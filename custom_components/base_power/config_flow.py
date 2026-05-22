@@ -59,13 +59,14 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         _LOGGER.error("No client token received from Clerk")
                         errors["base"] = "auth_failed"
                     else:
-                        # Send OTP code
-                        await BasePowerAuth.async_prepare_first_factor(
+                        # Send OTP code (token may rotate)
+                        prep_result = await BasePowerAuth.async_prepare_first_factor(
                             session,
                             self._sign_in_id,
                             self._email_id,
                             self._client_token,
                         )
+                        self._client_token = prep_result["client_token"]
                         return await self.async_step_verify_code()
             except AuthenticationError as err:
                 _LOGGER.error("Authentication error: %s", err)

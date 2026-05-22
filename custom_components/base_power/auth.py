@@ -140,7 +140,7 @@ class BasePowerAuth:
         sign_in_id: str,
         email_id: str,
         client_token: str,
-    ) -> bool:
+    ) -> dict[str, Any]:
         """Step 2: Send OTP code to email."""
         url = (
             f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/"
@@ -159,7 +159,13 @@ class BasePowerAuth:
                 raise AuthenticationError(
                     f"Failed to send verification email: {resp.status}"
                 )
-            return True
+            # Capture rotated client token
+            updated_token = resp.headers.get("Authorization", client_token)
+            _LOGGER.debug(
+                "prepare_first_factor token rotated: %s",
+                updated_token != client_token,
+            )
+            return {"client_token": updated_token}
 
     @staticmethod
     async def async_attempt_first_factor(
@@ -183,6 +189,12 @@ class BasePowerAuth:
 
             # Updated client token from response header
             new_client_token = resp.headers.get("Authorization", client_token)
+            _LOGGER.debug(
+                "attempt_first_factor token rotated: %s (new_len=%d, old_len=%d)",
+                new_client_token != client_token,
+                len(new_client_token),
+                len(client_token),
+            )
             body = await resp.json()
 
             # Extract session ID from active sessions
