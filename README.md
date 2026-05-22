@@ -37,12 +37,6 @@ After setup, Home Assistant will have a **Base Power device** with:
 | Solar Available | Does this system include solar? |
 | Automatic Backup Enabled | Is automatic backup mode configured? |
 
-### Buttons
-| Entity | Description |
-|--------|-------------|
-| Trigger Manual Backup | Switches the battery to backup mode immediately |
-| Reset Overcurrent Protection | Resets the overcurrent protection circuit |
-
 ---
 
 ## Requirements
