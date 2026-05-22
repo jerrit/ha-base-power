@@ -4,6 +4,7 @@ HACS_INTEGRATION.md
 test_grid_status.ps1
 base-power.xapk
 extracted/
+tools/
 
 # Python
 __pycache__/
