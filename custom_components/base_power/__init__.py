@@ -17,6 +17,7 @@ from .const import (
     PLATFORMS,
     CONF_CLIENT_TOKEN,
     CONF_SESSION_ID,
+    CONF_SESSION_JWT,
     CONF_SERVICE_LOCATION_ID,
 )
 from .coordinator import BasePowerCoordinator
@@ -35,6 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session=clerk_session,
         client_token=entry.data[CONF_CLIENT_TOKEN],
         session_id=entry.data[CONF_SESSION_ID],
+        session_jwt=entry.data.get(CONF_SESSION_JWT),
     )
 
     api_client = BasePowerApiClient(session=session)

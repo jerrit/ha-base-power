@@ -15,6 +15,7 @@ from .const import (
     DOMAIN,
     CONF_CLIENT_TOKEN,
     CONF_SESSION_ID,
+    CONF_SESSION_JWT,
     CONF_SERVICE_LOCATION_ID,
 )
 from .auth import BasePowerAuth, AuthenticationError
@@ -36,6 +37,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._email_id: str = ""
         self._client_token: str = ""
         self._session_id: str = ""
+        self._session_jwt: str | None = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -100,6 +102,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                     self._session_id = result["session_id"]
                     self._client_token = result["client_token"]
+                    self._session_jwt = result.get("session_jwt")
                     return await self.async_step_location()
             except AuthenticationError:
                 errors["base"] = "invalid_code"
@@ -133,6 +136,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_EMAIL: self._email,
                     CONF_CLIENT_TOKEN: self._client_token,
                     CONF_SESSION_ID: self._session_id,
+                    CONF_SESSION_JWT: self._session_jwt,
                     CONF_SERVICE_LOCATION_ID: service_location_id,
                 },
             )

@@ -22,6 +22,7 @@ DEFAULT_BATTERY_COUNT = 1  # Fallback if API doesn't report count
 # Config keys
 CONF_CLIENT_TOKEN = "client_token"
 CONF_SESSION_ID = "session_id"
+CONF_SESSION_JWT = "session_jwt"
 CONF_SERVICE_LOCATION_ID = "service_location_id"
 CONF_EMAIL = "email"
 

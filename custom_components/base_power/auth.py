@@ -30,12 +30,13 @@ class BasePowerAuth:
         session: aiohttp.ClientSession,
         client_token: str,
         session_id: str,
+        session_jwt: str | None = None,
     ) -> None:
         """Initialize auth handler."""
         self._session = session
         self._client_token = client_token
         self._session_id = session_id
-        self._jwt: str | None = None
+        self._jwt: str | None = session_jwt
         self._jwt_expires_at: float = 0
 
     @property
@@ -49,16 +50,19 @@ class BasePowerAuth:
         return self._jwt is not None and time.time() < self._jwt_expires_at
 
     async def async_refresh_token(self) -> str:
-        """Refresh the JWT from Clerk."""
+        """Refresh the JWT from Clerk using native mobile API pattern."""
         url = (
             f"{CLERK_DOMAIN}/v1/client/sessions/"
-            f"{self._session_id}/tokens?_clerk_js_version={CLERK_JS_VERSION}"
+            f"{self._session_id}/tokens"
+            f"?_is_native=1&_clerk_js_version={CLERK_JS_VERSION}"
         )
-        headers = {**_CLERK_HEADERS, "Authorization": self._client_token}
-        cookies = {"__client": self._client_token}
+        headers = {
+            **_CLERK_HEADERS,
+            "Authorization": self._client_token,
+            "x-mobile": "1",
+        }
 
-        # Try with Authorization header first, then cookie
-        async with self._session.post(url, headers=headers, cookies=cookies) as resp:
+        async with self._session.post(url, headers=headers) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 _LOGGER.error("Failed to refresh JWT: %s %s", resp.status, text)
@@ -87,10 +91,14 @@ class BasePowerAuth:
         publishable_key: str,
     ) -> dict[str, Any]:
         """Step 1: Initiate Clerk sign-in with email."""
-        url = f"{CLERK_DOMAIN}/v1/client/sign_ins?_clerk_js_version={CLERK_JS_VERSION}"
+        url = (
+            f"{CLERK_DOMAIN}/v1/client/sign_ins"
+            f"?_is_native=1&_clerk_js_version={CLERK_JS_VERSION}"
+        )
         headers = {
             **_CLERK_HEADERS,
             "Authorization": f"Bearer {publishable_key}",
+            "x-mobile": "1",
         }
         data = {"identifier": email}
 
@@ -144,12 +152,16 @@ class BasePowerAuth:
         """Step 2: Send OTP code to email."""
         url = (
             f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/"
-            f"prepare_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
+            f"prepare_first_factor?_is_native=1&_clerk_js_version={CLERK_JS_VERSION}"
         )
-        cookies = {"__client": client_token}
+        headers = {
+            **_CLERK_HEADERS,
+            "Authorization": client_token,
+            "x-mobile": "1",
+        }
         data = {"strategy": "email_code", "email_address_id": email_id}
 
-        async with session.post(url, headers=_CLERK_HEADERS, data=data, cookies=cookies) as resp:
+        async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 _LOGGER.error(
@@ -177,31 +189,44 @@ class BasePowerAuth:
         """Step 3: Verify OTP code and get session."""
         url = (
             f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/"
-            f"attempt_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
+            f"attempt_first_factor?_is_native=1&_clerk_js_version={CLERK_JS_VERSION}"
         )
-        cookies = {"__client": client_token}
+        headers = {
+            **_CLERK_HEADERS,
+            "Authorization": client_token,
+            "x-mobile": "1",
+        }
         data = {"strategy": "email_code", "code": code}
 
-        async with session.post(url, headers=_CLERK_HEADERS, data=data, cookies=cookies) as resp:
+        async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise AuthenticationError(f"OTP verification failed: {text}")
 
             # Updated client token from response header
             new_client_token = resp.headers.get("Authorization", client_token)
-            _LOGGER.debug(
-                "attempt_first_factor token rotated: %s (new_len=%d, old_len=%d)",
-                new_client_token != client_token,
-                len(new_client_token),
-                len(client_token),
-            )
             body = await resp.json()
 
             # Extract session ID from active sessions
             sessions = body.get("client", {}).get("sessions", [])
             session_id = None
+            session_jwt = None
             if sessions:
                 session_id = sessions[0].get("id")
+                # Try to get JWT directly from response (avoids /tokens call)
+                last_token = sessions[0].get("last_active_token", {})
+                if isinstance(last_token, dict):
+                    session_jwt = last_token.get("jwt")
+
+            # Log what we found (ERROR level so it always shows)
+            _LOGGER.warning(
+                "attempt_first_factor: session_id=%s, token_rotated=%s, "
+                "jwt_in_response=%s, session_keys=%s",
+                session_id,
+                new_client_token != client_token,
+                bool(session_jwt),
+                list(sessions[0].keys()) if sessions else "none",
+            )
 
             # Log full response structure for discovery debugging
             _LOGGER.debug(
@@ -226,6 +251,7 @@ class BasePowerAuth:
             return {
                 "session_id": session_id,
                 "client_token": new_client_token,
+                "session_jwt": session_jwt,
                 "user_data": sessions[0].get("user", {}) if sessions else {},
             }
 
