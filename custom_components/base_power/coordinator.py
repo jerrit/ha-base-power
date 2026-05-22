@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -48,26 +47,41 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             jwt = await self.auth.async_ensure_valid_token()
             self.api.set_jwt(jwt)
 
-            # Fetch dashboard root (backup hours, status)
+            # Fetch core data (required)
             dashboard = await self.api.get_dashboard_root(self.service_location_id)
-
-            # Fetch recent usage (15-min kWh readings)
             usage = await self.api.get_recent_usage(self.service_location_id)
 
-            # Fetch grid status (outage, SoC)
-            grid = await self.api.get_grid_status(self.service_location_id)
+            # Fetch optional data (non-fatal if they fail)
+            grid: dict[str, Any] = {"available": False, "grid_is_up": True, "battery_soc_percent": None, "battery_remaining_seconds": 0}
+            wifi: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
+            energy: dict[str, Any] = {"grid_to_home_kwh": None, "solar_to_home_kwh": None, "battery_to_home_kwh": None}
+            billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
+            cycles: dict[str, Any] = {"asset_id": None}
 
-            # Fetch WiFi metrics
-            wifi = await self.api.get_wifi_metrics(self.service_location_id)
+            try:
+                grid = await self.api.get_grid_status(self.service_location_id)
+            except Exception as err:
+                _LOGGER.debug("GridStatus fetch failed: %s", err)
 
-            # Fetch energy breakdown
-            energy = await self.api.get_usage_energy(self.service_location_id)
+            try:
+                wifi = await self.api.get_wifi_metrics(self.service_location_id)
+            except Exception as err:
+                _LOGGER.debug("WifiMetrics fetch failed: %s", err)
 
-            # Fetch billing metadata
-            billing = await self.api.get_billing_metadata(self.service_location_id)
+            try:
+                energy = await self.api.get_usage_energy(self.service_location_id)
+            except Exception as err:
+                _LOGGER.debug("UsageEnergy fetch failed: %s", err)
 
-            # Fetch usage cycles (asset ID)
-            cycles = await self.api.get_usage_cycles(self.service_location_id)
+            try:
+                billing = await self.api.get_billing_metadata(self.service_location_id)
+            except Exception as err:
+                _LOGGER.debug("BillingMetadata fetch failed: %s", err)
+
+            try:
+                cycles = await self.api.get_usage_cycles(self.service_location_id)
+            except Exception as err:
+                _LOGGER.debug("UsageCycles fetch failed: %s", err)
 
             # Write debug dump of raw API responses
             try:
