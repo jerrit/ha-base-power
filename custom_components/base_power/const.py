@@ -16,8 +16,8 @@ SCAN_INTERVAL_SECONDS = 300  # 5 minutes
 GRID_SCAN_INTERVAL_SECONDS = 60  # 1 minute
 
 # Battery
-BATTERY_CAPACITY_KWH = 25
-BATTERY_FULL_BACKUP_SECONDS = 49652  # Calibration: 100% = 49652 seconds
+BATTERY_CAPACITY_PER_UNIT_KWH = 25  # Each Base Power battery is 25 kWh
+DEFAULT_BATTERY_COUNT = 1  # Fallback if API doesn't report count
 
 # Config keys
 CONF_CLIENT_TOKEN = "client_token"

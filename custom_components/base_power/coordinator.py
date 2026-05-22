@@ -12,7 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
-from .const import SCAN_INTERVAL_SECONDS, BATTERY_FULL_BACKUP_SECONDS, BATTERY_CAPACITY_KWH
+from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.api = api_client
         self.auth = auth
         self.service_location_id = service_location_id
+        self._max_backup_seconds: int = 0  # Track max for % calibration
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Base Power API."""
@@ -57,6 +58,15 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Derive additional values
             derived = self._derive_values(dashboard, usage)
 
+            # Battery percentage: track max backup_seconds as 100% calibration
+            backup_seconds = dashboard.get("backup_seconds", 0)
+            if backup_seconds > self._max_backup_seconds:
+                self._max_backup_seconds = backup_seconds
+            if self._max_backup_seconds > 0 and backup_seconds > 0:
+                derived["battery_percent"] = round(
+                    min((backup_seconds / self._max_backup_seconds) * 100, 100.0), 1
+                )
+
             return {
                 "dashboard": dashboard,
                 "usage": usage,
@@ -73,8 +83,13 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         dashboard: dict[str, Any], usage: list[dict[str, Any]]
     ) -> dict[str, Any]:
         """Derive additional sensor values from raw data."""
+        battery_count = dashboard.get("battery_count", DEFAULT_BATTERY_COUNT)
+        capacity_kwh = battery_count * BATTERY_CAPACITY_PER_UNIT_KWH
+
         derived: dict[str, Any] = {
-            "battery_percent": 0.0,
+            "battery_percent": None,
+            "battery_count": battery_count,
+            "capacity_kwh": capacity_kwh,
             "current_power_watts": 0,
             "current_kwh": 0.0,
             "daily_peak_kwh": 0.0,
@@ -82,15 +97,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "daily_total_kwh": 0.0,
             "intervals_today": 0,
         }
-
-        # Battery percent from backup seconds
-        backup_seconds = dashboard.get("backup_seconds", 0)
-        if backup_seconds > 0:
-            derived["battery_percent"] = round(
-                (backup_seconds / BATTERY_FULL_BACKUP_SECONDS) * 100, 1
-            )
-            # Cap at 100%
-            derived["battery_percent"] = min(derived["battery_percent"], 100.0)
 
         # Usage-derived values
         if usage:

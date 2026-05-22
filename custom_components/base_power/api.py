@@ -144,7 +144,7 @@ class BasePowerApiClient:
             "backup_seconds": 0,
             "backup_hours": 0.0,
             "battery_status": 0,
-            "service_state": 0,
+            "battery_count": 0,
             "has_solar": False,
         }
         if not data:
@@ -174,7 +174,7 @@ class BasePowerApiClient:
                     if inner_field == 1:
                         result["battery_status"] = inner_val
                     elif inner_field == 2:
-                        result["service_state"] = inner_val
+                        result["battery_count"] = inner_val
                     elif inner_field == 4:
                         result["has_solar"] = bool(inner_val)
             else:
