@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import struct
 import logging
+import json
+import os
 from typing import Any
 
 import aiohttp
@@ -11,6 +13,9 @@ import aiohttp
 from .const import API_HOST, API_SERVICE, API_CONTENT_TYPE
 
 _LOGGER = logging.getLogger(__name__)
+
+# Debug dump path - writes raw API responses to this file
+DEBUG_DUMP_PATH = "/config/base_power_debug.json"
 
 
 def _build_grpc_frame(payload: bytes) -> bytes:
@@ -76,6 +81,7 @@ class BasePowerApiClient:
         """Initialize the API client."""
         self._session = session
         self._jwt: str | None = None
+        self.raw_responses: dict[str, str] = {}  # method -> hex string
 
     def set_jwt(self, jwt: str) -> None:
         """Set the current JWT for API calls."""
@@ -102,8 +108,11 @@ class BasePowerApiClient:
                     grpc_status,
                     grpc_message,
                 )
+                self.raw_responses[method] = ""
                 return b""
-            return _parse_grpc_frame(response_data)
+            data = _parse_grpc_frame(response_data)
+            self.raw_responses[method] = data.hex() if data else ""
+            return data
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
         """Get dashboard root data including backup hours and status."""
