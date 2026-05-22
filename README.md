@@ -1,9 +1,9 @@
-# Base Power - Home Assistant Integration
+# Base Power - Home Assistant Integration (Unofficial)
 
 [![HACS Validation](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml/badge.svg)](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-Custom Home Assistant integration for [Base Power](https://basepowercompany.com/) home battery systems.
+Unofficial Home Assistant integration for [Base Power](https://basepowercompany.com/) home battery systems. This project is not affiliated with or endorsed by Base Power.
 
 ## Features
 
