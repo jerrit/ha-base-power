@@ -9,6 +9,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    UnitOfElectricCurrent,
     UnitOfEnergy,
     UnitOfPower,
     UnitOfTime,
@@ -52,6 +53,8 @@ async def async_setup_entry(
         BasePowerBillAmountSensor(coordinator, entry),
         BasePowerBillDueDateSensor(coordinator, entry),
         BasePowerAssetIdSensor(coordinator, entry),
+        BasePowerGridPowerAmpsSensor(coordinator, entry),
+        BasePowerDailyTotalGridSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -487,4 +490,48 @@ class BasePowerAssetIdSensor(BasePowerSensorBase):
         """Return asset ID."""
         if self.coordinator.data:
             return self.coordinator.data.get("cycles", {}).get("asset_id")
+        return None
+
+
+class BasePowerGridPowerAmpsSensor(BasePowerSensorBase):
+    """Sensor for current grid power draw (amps)."""
+
+    _attr_name = "Grid Power"
+    _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:current-ac"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_grid_power_amps"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return current grid power in amps."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("grid", {}).get("current_power_amps")
+        return None
+
+
+class BasePowerDailyTotalGridSensor(BasePowerSensorBase):
+    """Sensor for daily total from grid status endpoint."""
+
+    _attr_name = "Daily Total (Grid)"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:counter"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_daily_total_grid"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return daily total kWh from grid status."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("grid", {}).get("daily_total_kwh_grid")
         return None

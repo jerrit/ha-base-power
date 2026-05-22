@@ -69,6 +69,108 @@ def _skip_field(data: bytes, offset: int, wire_type: int) -> int:
     return offset
 
 
+def _parse_grid_data_point(sub: bytes) -> tuple[int, float | None, float | None]:
+    """Parse an 18-byte grid data sub-message: {timestamp, power, soc}."""
+    ts = 0
+    power_val: float | None = None
+    soc_val: float | None = None
+    offset = 0
+    while offset < len(sub):
+        tag_val, new_offset = _decode_varint(sub, offset)
+        if new_offset == offset:
+            break
+        offset = new_offset
+        field_num = tag_val >> 3
+        wire_type = tag_val & 0x07
+        if wire_type == 2:
+            length, offset = _decode_varint(sub, offset)
+            inner = sub[offset:offset + length]
+            offset += length
+            if field_num == 1:
+                # Timestamp sub-message: {field 1: varint}
+                _, ts_offset = _decode_varint(inner, 0)  # skip tag
+                ts, _ = _decode_varint(inner, 1)  # read varint after tag byte 0x08
+                if inner[0] == 0x08:
+                    ts, _ = _decode_varint(inner, 1)
+        elif wire_type == 5:
+            if offset + 4 <= len(sub):
+                val = struct.unpack("<f", sub[offset:offset + 4])[0]
+                if field_num == 2:
+                    power_val = val
+                elif field_num == 3:
+                    soc_val = val
+            offset += 4
+        elif wire_type == 0:
+            _, offset = _decode_varint(sub, offset)
+        elif wire_type == 1:
+            offset += 8
+        else:
+            break
+    return ts, power_val, soc_val
+
+
+def _parse_usage_point(sub: bytes) -> tuple[int, float]:
+    """Parse a 13-byte usage sub-message: {timestamp, kWh}."""
+    ts = 0
+    kwh = 0.0
+    offset = 0
+    while offset < len(sub):
+        tag_val, new_offset = _decode_varint(sub, offset)
+        if new_offset == offset:
+            break
+        offset = new_offset
+        field_num = tag_val >> 3
+        wire_type = tag_val & 0x07
+        if wire_type == 2:
+            length, offset = _decode_varint(sub, offset)
+            inner = sub[offset:offset + length]
+            offset += length
+            if field_num == 1 and inner[0] == 0x08:
+                ts, _ = _decode_varint(inner, 1)
+        elif wire_type == 5:
+            if offset + 4 <= len(sub):
+                val = struct.unpack("<f", sub[offset:offset + 4])[0]
+                if field_num == 2:
+                    kwh = val
+            offset += 4
+        elif wire_type == 0:
+            _, offset = _decode_varint(sub, offset)
+        elif wire_type == 1:
+            offset += 8
+        else:
+            break
+    return ts, kwh
+
+
+def _parse_grid_summary(sub: bytes, result: dict[str, Any]) -> None:
+    """Parse Field 6 summary: {field1: total_kwh, field3: avg_kwh}."""
+    offset = 0
+    while offset < len(sub):
+        tag_val, new_offset = _decode_varint(sub, offset)
+        if new_offset == offset:
+            break
+        offset = new_offset
+        field_num = tag_val >> 3
+        wire_type = tag_val & 0x07
+        if wire_type == 5:
+            if offset + 4 <= len(sub):
+                val = struct.unpack("<f", sub[offset:offset + 4])[0]
+                if field_num == 1:
+                    result["daily_total_kwh_grid"] = round(val, 2)
+                elif field_num == 3:
+                    result["daily_avg_kwh_grid"] = round(val, 4)
+            offset += 4
+        elif wire_type == 0:
+            _, offset = _decode_varint(sub, offset)
+        elif wire_type == 2:
+            length, offset = _decode_varint(sub, offset)
+            offset += length
+        elif wire_type == 1:
+            offset += 8
+        else:
+            break
+
+
 class BasePowerApiClient:
     """Client for the Base Power gRPC-Web API."""
 
@@ -293,48 +395,99 @@ class BasePowerApiClient:
     def _parse_grid_status(data: bytes) -> dict[str, Any]:
         """Parse MobileGetGridStatus response.
 
-        Known fields:
-          Field 1 (varint): outage_status (0=grid_up, 1=outage)
-          Field 2 (varint): battery_remaining_seconds
-          Field 3 (varint): battery_soc_percent (0-100)
+        Rich response with time-series data:
+          Field 1 (repeated submsg): 15-min usage intervals {timestamp, kWh}
+          Field 2 (repeated submsg): 15-min grid data {timestamp, power_value, battery_soc%}
+          Field 3 (submsg): time range marker
+          Field 4 (repeated submsg): hourly usage totals {timestamp, kWh}
+          Field 6 (submsg): summary {total_kwh, avg_kwh}
         """
         result: dict[str, Any] = {
             "available": False,
             "grid_is_up": True,
             "battery_soc_percent": None,
             "battery_remaining_seconds": 0,
+            "current_power_amps": None,
+            "hourly_usage": [],
         }
         if not data:
             return result
 
         result["available"] = True
-        _LOGGER.debug("GridStatus raw hex: %s", data.hex())
+        _LOGGER.debug("GridStatus raw (%d bytes)", len(data))
 
+        # Parse top-level fields
         offset = 0
-        fields: dict[int, int] = {}
+        latest_soc: float | None = None
+        latest_power: float | None = None
+        latest_ts = 0
+        hourly: list[dict[str, Any]] = []
+
         while offset < len(data):
             if offset >= len(data):
                 break
-            tag = data[offset]
-            field_num = tag >> 3
-            wire_type = tag & 0x07
-            offset += 1
+            tag_val, new_offset = _decode_varint(data, offset)
+            if new_offset == offset:
+                break
+            offset = new_offset
+            field_num = tag_val >> 3
+            wire_type = tag_val & 0x07
 
-            if wire_type == 0:
+            if wire_type == 2:  # length-delimited (sub-message)
+                length, offset = _decode_varint(data, offset)
+                if offset + length > len(data):
+                    break
+                sub = data[offset:offset + length]
+                offset += length
+
+                if field_num == 2 and length == 18:
+                    # 15-min grid data: {field1: {field1: timestamp}, field2: power, field3: soc}
+                    ts, power_val, soc_val = _parse_grid_data_point(sub)
+                    if ts and ts > latest_ts:
+                        latest_ts = ts
+                        latest_power = power_val
+                        latest_soc = soc_val
+
+                elif field_num == 4 and length == 13:
+                    # Hourly usage: {field1: {field1: timestamp}, field2: kWh}
+                    ts, kwh = _parse_usage_point(sub)
+                    if ts:
+                        hourly.append({"timestamp": ts, "kwh": round(kwh, 3)})
+
+                elif field_num == 6:
+                    # Summary: {field1: total_kwh (fixed32), field3: avg_kwh (fixed32)}
+                    _parse_grid_summary(sub, result)
+
+            elif wire_type == 0:
                 val, offset = _decode_varint(data, offset)
-                fields[field_num] = val
+                # Simple varint fields (fallback for simpler responses)
+                if field_num == 1:
+                    result["grid_is_up"] = val == 0
+                elif field_num == 2:
+                    result["battery_remaining_seconds"] = val
+                elif field_num == 3:
+                    result["battery_soc_percent"] = val
+            elif wire_type == 5:
+                offset += 4
+            elif wire_type == 1:
+                offset += 8
             else:
-                offset = _skip_field(data, offset, wire_type)
+                break
 
-        _LOGGER.debug("GridStatus fields: %s", fields)
+        # Use latest time-series SoC if found
+        if latest_soc is not None:
+            result["battery_soc_percent"] = round(latest_soc, 1)
+        if latest_power is not None:
+            result["current_power_amps"] = round(latest_power, 2)
+        if hourly:
+            result["hourly_usage"] = hourly
 
-        if 1 in fields:
-            result["grid_is_up"] = fields[1] == 0
-        if 2 in fields:
-            result["battery_remaining_seconds"] = fields[2]
-        if 3 in fields:
-            result["battery_soc_percent"] = fields[3]
-
+        _LOGGER.debug(
+            "GridStatus: soc=%.1f%%, power=%.1f, hourly_points=%d",
+            result["battery_soc_percent"] or 0,
+            result["current_power_amps"] or 0,
+            len(hourly),
+        )
         return result
 
     @staticmethod

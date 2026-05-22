@@ -51,7 +51,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             usage = await self.api.get_recent_usage(self.service_location_id)
 
             # Fetch optional data (non-fatal if they fail)
-            grid: dict[str, Any] = {"available": False, "grid_is_up": True, "battery_soc_percent": None, "battery_remaining_seconds": 0}
+            grid: dict[str, Any] = {"available": False, "grid_is_up": True, "battery_soc_percent": None, "battery_remaining_seconds": 0, "current_power_amps": None, "hourly_usage": []}
             wifi: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
             energy: dict[str, Any] = {"grid_to_home_kwh": None, "solar_to_home_kwh": None, "battery_to_home_kwh": None}
             billing: dict[str, Any] = {"amount_cents": None, "due_date": None}

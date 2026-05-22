@@ -11,6 +11,7 @@ test_api.py
 test_auth.py
 test_discover.py
 decode_proto.py
+probe_api.py
 
 # Python
 __pycache__/
