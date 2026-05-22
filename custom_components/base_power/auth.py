@@ -17,6 +17,12 @@ _LOGGER = logging.getLogger(__name__)
 JWT_REFRESH_BUFFER = 10
 JWT_LIFETIME = 60
 
+# Headers to pass Clerk's bot protection
+_CLERK_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
+}
+
 
 class BasePowerAuth:
     """Handle Clerk authentication and JWT refresh."""
@@ -50,7 +56,7 @@ class BasePowerAuth:
             f"{CLERK_DOMAIN}/v1/client/sessions/"
             f"{self._session_id}/tokens?_clerk_js_version={CLERK_JS_VERSION}"
         )
-        headers = {"Authorization": self._client_token}
+        headers = {**_CLERK_HEADERS, "Authorization": self._client_token}
 
         async with self._session.post(url, headers=headers) as resp:
             if resp.status != 200:
@@ -79,8 +85,8 @@ class BasePowerAuth:
         """Step 1: Initiate Clerk sign-in with email."""
         url = f"{CLERK_DOMAIN}/v1/client/sign_ins?_clerk_js_version={CLERK_JS_VERSION}"
         headers = {
+            **_CLERK_HEADERS,
             "Authorization": f"Bearer {publishable_key}",
-            "Content-Type": "application/x-www-form-urlencoded",
         }
         data = urlencode({"identifier": email})
 
@@ -137,8 +143,8 @@ class BasePowerAuth:
             f"prepare_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
         )
         headers = {
+            **_CLERK_HEADERS,
             "Authorization": client_token,
-            "Content-Type": "application/x-www-form-urlencoded",
         }
         data = urlencode({"strategy": "email_code", "email_address_id": email_id})
 
@@ -167,8 +173,8 @@ class BasePowerAuth:
             f"attempt_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
         )
         headers = {
+            **_CLERK_HEADERS,
             "Authorization": client_token,
-            "Content-Type": "application/x-www-form-urlencoded",
         }
         data = urlencode({"strategy": "email_code", "code": code})
 
