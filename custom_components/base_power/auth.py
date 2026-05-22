@@ -77,17 +77,29 @@ class BasePowerAuth:
     ) -> dict[str, Any]:
         """Step 1: Initiate Clerk sign-in with email."""
         url = f"{CLERK_DOMAIN}/v1/client/sign_ins?_clerk_js_version={CLERK_JS_VERSION}"
-        headers = {"Authorization": f"Bearer {publishable_key}"}
-        data = {"identifier": email}
+        headers = {
+            "Authorization": f"Bearer {publishable_key}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = f"identifier={email}"
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
                 text = await resp.text()
-                raise AuthenticationError(f"Sign-in initiation failed: {text}")
+                _LOGGER.error("Sign-in initiation failed: %s", text)
+                raise AuthenticationError(f"Sign-in initiation failed: {resp.status}")
 
-            # Client token comes from Authorization response header
+            # Client token from Authorization response header
             client_token = resp.headers.get("Authorization", "")
             body = await resp.json()
+
+            # Fallback: extract token from response body if header is empty
+            if not client_token:
+                client_token = body.get("client", {}).get("id", "")
+                _LOGGER.debug(
+                    "Authorization header empty, using client id: %s",
+                    client_token[:20] if client_token else "none",
+                )
 
             sign_in_id = body.get("response", {}).get("id")
             email_id = None
@@ -99,6 +111,11 @@ class BasePowerAuth:
                 if factor.get("strategy") == "email_code":
                     email_id = factor.get("email_address_id")
                     break
+
+            _LOGGER.debug(
+                "Sign-in initiated: id=%s email_id=%s token_len=%d",
+                sign_in_id, email_id, len(client_token) if client_token else 0,
+            )
 
             return {
                 "sign_in_id": sign_in_id,
@@ -118,11 +135,23 @@ class BasePowerAuth:
             f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/"
             f"prepare_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
         )
-        headers = {"Authorization": client_token}
-        data = {"strategy": "email_code", "email_address_id": email_id}
+        headers = {
+            "Authorization": client_token,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = f"strategy=email_code&email_address_id={email_id}"
 
         async with session.post(url, headers=headers, data=data) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                text = await resp.text()
+                _LOGGER.error(
+                    "prepare_first_factor failed: status=%s body=%s",
+                    resp.status, text,
+                )
+                raise AuthenticationError(
+                    f"Failed to send verification email: {resp.status}"
+                )
+            return True
 
     @staticmethod
     async def async_attempt_first_factor(
@@ -136,8 +165,11 @@ class BasePowerAuth:
             f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/"
             f"attempt_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
         )
-        headers = {"Authorization": client_token}
-        data = {"strategy": "email_code", "code": code}
+        headers = {
+            "Authorization": client_token,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = f"strategy=email_code&code={code}"
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
