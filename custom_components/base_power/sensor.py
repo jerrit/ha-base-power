@@ -34,6 +34,8 @@ async def async_setup_entry(
     entities = [
         BasePowerBackupHoursSensor(coordinator, entry),
         BasePowerBatteryPercentSensor(coordinator, entry),
+        BasePowerBatteryCountSensor(coordinator, entry),
+        BasePowerCapacitySensor(coordinator, entry),
         BasePowerCurrentPowerSensor(coordinator, entry),
         BasePowerCurrentEnergySensor(coordinator, entry),
         BasePowerDailyPeakSensor(coordinator, entry),
@@ -106,6 +108,48 @@ class BasePowerBatteryPercentSensor(BasePowerSensorBase):
         """Return estimated battery percentage."""
         if self.coordinator.data:
             return self.coordinator.data["derived"].get("battery_percent")
+        return None
+
+
+class BasePowerBatteryCountSensor(BasePowerSensorBase):
+    """Sensor for number of battery units installed."""
+
+    _attr_name = "Battery Count"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-multiple"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_battery_count"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return number of battery units."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("battery_count")
+        return None
+
+
+class BasePowerCapacitySensor(BasePowerSensorBase):
+    """Sensor for total system capacity in kWh."""
+
+    _attr_name = "System Capacity"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY_STORAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-high"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_capacity"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return total system capacity in kWh."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("capacity_kwh")
         return None
 
 

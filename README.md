@@ -90,6 +90,10 @@ The **Daily Total Energy** sensor uses `state_class: total_increasing` and is co
 ### Reauthentication required
 - Clerk sessions can expire. Go to the integration and click **Reconfigure** to re-authenticate.
 
+## A Note on Cost & Billing
+
+I have taken out cost & billing information, however if this is desired from others please put in an issue as a request and I can add it. Happy to receive any other feature enhancement requests as well!
+
 ## Contributing
 
 Contributions are welcome! Please open an issue or PR on [GitHub](https://github.com/jerrit/ha-base-power).
