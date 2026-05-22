@@ -1,6 +1,11 @@
+# Analysis/dev files
+BASE_POWER_API.md
+HACS_INTEGRATION.md
+test_grid_status.ps1
+base-power.xapk
+extracted/
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
-.DS_Store
+*.py[cod]
 *.egg-info/
-.pytest_cache/

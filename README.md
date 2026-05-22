@@ -1,159 +1,89 @@
-# Base Power for Home Assistant
+# Base Power - Home Assistant Integration
 
-[![HACS Badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![GitHub Release](https://img.shields.io/github/v/release/jerrit/ha-base-power)](https://github.com/jerrit/ha-base-power/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![HACS Validation](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml/badge.svg)](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-An unofficial Home Assistant integration for **[Base Power](https://basepowercompany.com)** — bringing your home battery, solar, grid, and energy data directly into Home Assistant.
+Custom Home Assistant integration for [Base Power](https://basepowercompany.com/) home battery systems.
 
-> **Disclaimer:** This is a community-built integration. It is not affiliated with, endorsed by, or supported by Base Power Company. Use at your own risk.
+## Features
 
----
-
-## What You Get
-
-After setup, Home Assistant will have a **Base Power device** with:
-
-### Sensors
-| Entity | Description |
-|--------|-------------|
-| Current Interval Energy | Energy consumed in the current 15-min window (kWh) |
-| Current Power | Instantaneous power estimate derived from the interval (W) |
-| Daily Total Energy | Sum of all 15-min readings today (kWh) |
-| Daily Peak Interval | Highest single 15-min reading today (kWh) |
-| Intervals Today | Number of 15-min readings received today |
-| Battery Status | Battery state (not_installed / installed / in_service / …) |
-| Service State | Service state (unknown / in_service / …) |
-| Grid to Home Energy | Energy drawn from the grid (kWh) |
-| Solar to Home Energy | Energy sourced from solar (kWh) |
-| Total Energy to Home | Combined energy delivered to the home (kWh) |
-
-### Binary Sensors
-| Entity | Description |
-|--------|-------------|
-| Grid Connected | Is the battery connected to the grid? |
-| Outage Active | Is an outage currently in progress? |
-| Battery Backup Active | Is the battery actively supplying backup power? |
-| Solar Available | Does this system include solar? |
-| Automatic Backup Enabled | Is automatic backup mode configured? |
-
----
-
-## Requirements
-
-- Home Assistant **2024.1.0** or newer
-- A Base Power account (email + password / email OTP)
-- HACS installed (recommended) **or** manual installation
-
----
+- **Battery Level** — Estimated battery percentage derived from backup time
+- **Backup Time** — Hours of backup power remaining
+- **Current Power** — Real-time power consumption (watts)
+- **Energy Monitoring** — 15-minute interval energy data compatible with HA Energy Dashboard
+- **Daily Statistics** — Peak, low, and total daily energy consumption
+- **Solar Status** — Whether solar panels are connected
+- **Battery Connectivity** — WiFi connection status
 
 ## Installation
 
-### Option A — HACS (Recommended)
+### HACS (Recommended)
 
-1. Open HACS in your Home Assistant sidebar.
-2. Click **Integrations** → **⋮ menu** → **Custom repositories**.
-3. Add `https://github.com/jerrit/ha-base-power` with category **Integration**.
-4. Search for **Base Power** in HACS and click **Download**.
-5. Restart Home Assistant.
+1. Open HACS in Home Assistant
+2. Click the three dots menu → **Custom repositories**
+3. Add `https://github.com/jerrit/ha-base-power` with category **Integration**
+4. Click **Install**
+5. Restart Home Assistant
 
-### Option B — Manual
+### Manual
 
-1. Download the [latest release](https://github.com/jerrit/ha-base-power/releases).
-2. Copy the `custom_components/base_power` folder into your HA config directory so the path is:
-   ```
-   /config/custom_components/base_power/
-   ```
-3. Restart Home Assistant.
-
----
+1. Copy the `custom_components/base_power` folder to your `config/custom_components/` directory
+2. Restart Home Assistant
 
 ## Configuration
 
-Base Power uses **email one-time codes** for sign-in — no password required.
+1. Go to **Settings** → **Devices & Services** → **Add Integration**
+2. Search for "Base Power"
+3. Enter your Base Power account email
+4. Check your email for a verification code and enter it
+5. Enter your Service Location ID (found in the Base Power app)
 
-1. Go to **Settings → Devices & Services → Add Integration**.
-2. Search for **Base Power** and select it.
-3. **Step 1 — Email:** Enter the email address on your Base Power account and click **Submit**. A 6-digit code will be sent to that address.
-4. **Step 2 — Verify:** Open the email from Base Power and enter the 6-digit code.
-5. **Step 3 — Location** *(only shown if you have multiple service addresses)*: Select which location to monitor.
-6. Done! Your Base Power device will appear in Home Assistant within a few seconds.
+## Entities
 
-### Re-authentication
+### Sensors
 
-If your session expires, Home Assistant will show a notification prompting you to sign in again. Follow the same email OTP flow — no data will be lost.
+| Entity | Description | Unit |
+|--------|-------------|------|
+| Battery Level | Estimated state of charge | % |
+| Battery Backup Time | Hours of backup remaining | hours |
+| Current Power | Current power draw | W |
+| Current Interval Energy | Energy for current 15-min period | kWh |
+| Daily Peak | Highest 15-min interval today | kWh |
+| Daily Low | Lowest 15-min interval today | kWh |
+| Daily Total Energy | Cumulative energy today | kWh |
+| Intervals Today | Number of data intervals today | — |
 
----
+### Binary Sensors
 
-## Data Update Frequency
-
-| Data | Interval | Notes |
-|------|----------|-------|
-| Energy / battery status | Every 5 minutes | Primary dashboard data |
-| Grid status | Every 5 minutes | Outage detection |
-| Authentication token | Every 50 seconds | Background, transparent to the user |
-
-> The Base Power API provides 15-minute interval readings. Polling more frequently than that will not yield new energy data.
-
----
+| Entity | Description |
+|--------|-------------|
+| Solar Connected | Whether solar panels are present |
+| Battery Connected | Battery WiFi connectivity status |
 
 ## Energy Dashboard
 
-To use **Current Interval Energy** or **Daily Total Energy** with the Home Assistant Energy Dashboard:
+The **Daily Total Energy** sensor uses `state_class: total_increasing` and is compatible with the Home Assistant Energy Dashboard. Add it as a grid consumption sensor.
 
-1. Go to **Settings → Dashboards → Energy**.
-2. Under **Electricity grid → Grid consumption**, add **Base Power Current Interval Energy**.
-3. If you have solar, add **Solar to Home Energy** under **Solar panels**.
+## Technical Details
 
-> Note: The API provides interval measurements (not cumulative totals). For precise long-term tracking, pair this integration with a `utility_meter` helper in Home Assistant.
-
----
+- **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
+- **Authentication**: Clerk (email OTP → JWT with 60-second lifetime)
+- **Polling Interval**: 5 minutes (configurable)
+- **Battery**: 25 kWh capacity system
 
 ## Troubleshooting
 
-### "Could not connect to Base Power"
-- Check your internet connection.
-- Confirm `dashboard.baseapis.net` is reachable from your HA host.
+### "Authentication failed" during setup
+- Ensure you're using the same email as your Base Power app account
+- The verification code expires quickly — enter it promptly
 
-### "The verification code was incorrect"
-- OTP codes expire quickly. Request a fresh one by re-starting the setup flow.
-- Make sure you are using the most recent code from your inbox.
+### No data / sensors unavailable
+- New installations may take time before telemetry data starts flowing
+- Check that your battery is connected to WiFi in the Base Power app
 
-### Sensors show "Unavailable" after setup
-- This is normal for brand-new installs. Some data (billing cycles, grid status) only appears once the system has been active for at least one billing period.
-- Check **Settings → System → Logs** for `base_power` entries for more detail.
-
-### Re-authentication loop
-- If you are repeatedly prompted to sign in, your Base Power account session may have been revoked (e.g., you signed out from the app). Complete the sign-in flow again to issue a new session.
-
----
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repo and create a feature branch.
-2. Follow [Home Assistant development guidelines](https://developers.home-assistant.io/docs/development_index).
-3. Open a pull request with a clear description of the change.
-
-### Reporting Issues
-
-Open an issue on [GitHub](https://github.com/jerrit/ha-base-power/issues) and include:
-- Home Assistant version
-- Integration version
-- Relevant log lines (Settings → System → Logs, filter by `base_power`)
-- Description of what you expected vs. what happened
-
----
+### Reauthentication required
+- Clerk sessions can expire. Go to the integration and click **Reconfigure** to re-authenticate.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
-
----
-
-## Acknowledgements
-
-- The [Home Assistant](https://www.home-assistant.io/) team for the incredible platform.
-- The [HACS](https://hacs.xyz/) project for making custom integrations easy to distribute.
-- The Base Power community for inspiring this work.
+MIT

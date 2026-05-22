@@ -1,529 +1,268 @@
-"""Base Power gRPC-Web API client.
+"""Base Power gRPC-Web API client."""
 
-All encoding/decoding is done manually to avoid a protobuf library dependency.
-The gRPC-Web wire format is: 0x00 (data flag) + 4-byte BE length + protobuf payload.
-"""
 from __future__ import annotations
 
-import logging
 import struct
+import logging
+from typing import Any
 
 import aiohttp
 
-from .auth import ClerkAuth, ClerkAuthError
-from .const import BASE_API_URL, BATTERY_STATUS, SERVICE_STATE
+from .const import API_HOST, API_SERVICE, API_CONTENT_TYPE
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class BasePowerAPIError(Exception):
-    """Raised when an API call fails."""
+def _build_grpc_frame(payload: bytes) -> bytes:
+    """Wrap protobuf message in gRPC-Web frame."""
+    return b"\x00" + struct.pack(">I", len(payload)) + payload
 
 
-# ---------------------------------------------------------------------------
-# Protobuf helper — minimal varint / field reader
-# ---------------------------------------------------------------------------
+def _parse_grpc_frame(response: bytes) -> bytes:
+    """Extract protobuf data from gRPC-Web response frame."""
+    if len(response) < 5:
+        return b""
+    flag = response[0]
+    if flag == 0x80:  # Trailer only, no data
+        return b""
+    length = struct.unpack(">I", response[1:5])[0]
+    if length == 0:
+        return b""
+    return response[5 : 5 + length]
 
-def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
-    """Decode a protobuf varint starting at offset. Returns (value, new_offset)."""
-    value = 0
+
+def _encode_service_location_request(service_location_id: str) -> bytes:
+    """Encode a protobuf request with service_location_id as field 1 (string)."""
+    encoded = service_location_id.encode("utf-8")
+    return b"\x0a" + bytes([len(encoded)]) + encoded
+
+
+def _decode_varint(data: bytes, offset: int) -> tuple[int, int]:
+    """Decode a protobuf varint, return (value, new_offset)."""
+    val = 0
     shift = 0
     while offset < len(data):
         b = data[offset]
-        offset += 1
-        value |= (b & 0x7F) << shift
+        val |= (b & 0x7F) << shift
         shift += 7
+        offset += 1
         if not (b & 0x80):
             break
-    return value, offset
+    return val, offset
 
 
-def _encode_string_field(field_number: int, value: str) -> bytes:
-    """Encode a protobuf length-delimited string field."""
-    encoded = value.encode("utf-8")
-    tag = (field_number << 3) | 2  # wire type 2 = length-delimited
-    return bytes([tag, len(encoded)]) + encoded
-
-
-def _wrap_grpc(proto_bytes: bytes) -> bytes:
-    """Wrap protobuf bytes in a gRPC-Web data frame."""
-    return b"\x00" + struct.pack(">I", len(proto_bytes)) + proto_bytes
-
-
-def _unwrap_grpc(response: bytes) -> bytes:
-    """Extract the protobuf payload from a gRPC-Web response.
-
-    A response may contain multiple frames; we collect all data frames
-    (flag byte 0x00) and ignore trailer frames (0x80).
-    """
-    result = bytearray()
-    offset = 0
-    while offset + 5 <= len(response):
-        flag = response[offset]
-        length = struct.unpack(">I", response[offset + 1 : offset + 5])[0]
-        offset += 5
-        if flag == 0x00 and offset + length <= len(response):
-            result.extend(response[offset : offset + length])
+def _skip_field(data: bytes, offset: int, wire_type: int) -> int:
+    """Skip a protobuf field based on wire type."""
+    if wire_type == 0:  # Varint
+        while offset < len(data) and (data[offset] & 0x80):
+            offset += 1
+        offset += 1
+    elif wire_type == 2:  # Length-delimited
+        length, offset = _decode_varint(data, offset)
         offset += length
-    return bytes(result)
+    elif wire_type == 5:  # 32-bit
+        offset += 4
+    elif wire_type == 1:  # 64-bit
+        offset += 8
+    else:
+        offset += 1
+    return offset
 
 
-# ---------------------------------------------------------------------------
-# API client
-# ---------------------------------------------------------------------------
+class BasePowerApiClient:
+    """Client for the Base Power gRPC-Web API."""
 
-EMPTY_REQUEST = b"\x00\x00\x00\x00\x00"  # gRPC-Web frame for an empty proto
-
-
-class BasePowerAPI:
-    """Async client for the Base Power gRPC-Web API."""
-
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        auth: ClerkAuth,
-        service_location_id: str,
-    ) -> None:
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        """Initialize the API client."""
         self._session = session
-        self._auth = auth
-        self._service_location_id = service_location_id
+        self._jwt: str | None = None
 
-    # ------------------------------------------------------------------
-    # Low-level transport
-    # ------------------------------------------------------------------
-
-    def _location_payload(self) -> bytes:
-        """Build the protobuf request body for endpoints that take service_location_id."""
-        return _encode_string_field(1, self._service_location_id)
+    def set_jwt(self, jwt: str) -> None:
+        """Set the current JWT for API calls."""
+        self._jwt = jwt
 
     async def _call(self, method: str, payload: bytes = b"") -> bytes:
-        """Execute a gRPC-Web POST. Returns the raw protobuf response bytes."""
-        jwt = await self._auth.get_valid_jwt()
-        url = f"{BASE_API_URL}/{method}"
+        """Make a gRPC-Web API call."""
+        url = f"{API_HOST}/{API_SERVICE}/{method}"
         headers = {
-            "Content-Type": "application/grpc-web+proto",
-            "authorization": jwt,   # NO "Bearer" prefix — Base Power API requires raw JWT
+            "Content-Type": API_CONTENT_TYPE,
+            "authorization": self._jwt,
             "x-grpc-web": "1",
         }
-        body = _wrap_grpc(payload)
+        body = _build_grpc_frame(payload)
 
-        try:
-            async with self._session.post(url, headers=headers, data=body) as resp:
-                if resp.status != 200:
-                    raise BasePowerAPIError(
-                        f"HTTP {resp.status} calling {method}"
-                    )
-                raw = await resp.read()
-                return _unwrap_grpc(raw)
-        except aiohttp.ClientError as err:
-            raise BasePowerAPIError(f"Network error calling {method}: {err}") from err
+        async with self._session.post(url, headers=headers, data=body) as resp:
+            response_data = await resp.read()
+            grpc_status = resp.headers.get("grpc-status", "")
+            if grpc_status and grpc_status != "0":
+                grpc_message = resp.headers.get("grpc-message", "unknown")
+                _LOGGER.error(
+                    "gRPC error calling %s: status=%s message=%s",
+                    method,
+                    grpc_status,
+                    grpc_message,
+                )
+                return b""
+            return _parse_grpc_frame(response_data)
 
-    # ------------------------------------------------------------------
-    # Public API methods
-    # ------------------------------------------------------------------
+    async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
+        """Get dashboard root data including backup hours and status."""
+        payload = _encode_service_location_request(service_location_id)
+        data = await self._call("MobileGetDashboardRoot", payload)
+        return self._parse_dashboard_root(data)
 
-    async def get_user(self) -> dict:
-        """MobileGetUser — returns user profile."""
-        raw = await self._call("MobileGetUser")
-        return _parse_user(raw)
+    async def get_recent_usage(self, service_location_id: str) -> list[dict[str, Any]]:
+        """Get recent 15-min interval usage data."""
+        payload = _encode_service_location_request(service_location_id)
+        data = await self._call("MobileGetRecentUsage", payload)
+        return self._parse_recent_usage(data)
 
-    async def get_service_locations(self) -> list[dict]:
-        """MobileGetDashboardRoots — returns all service locations."""
-        raw = await self._call("MobileGetDashboardRoots")
-        return _parse_dashboard_roots(raw)
+    async def get_grid_status(self, service_location_id: str) -> dict[str, Any]:
+        """Get grid status (battery SoC, power flow - pending telemetry)."""
+        payload = _encode_service_location_request(service_location_id)
+        data = await self._call("MobileGetGridStatus", payload)
+        if not data:
+            return {"available": False}
+        return {"available": True, "raw": data}
 
-    async def get_dashboard_root(self) -> dict:
-        """MobileGetDashboardRoot — primary data source for battery/energy status."""
-        raw = await self._call("MobileGetDashboardRoot", self._location_payload())
-        return _parse_dashboard_root(raw)
+    async def get_wifi_metrics(self, service_location_id: str) -> dict[str, Any]:
+        """Get battery WiFi connectivity metrics."""
+        payload = _encode_service_location_request(service_location_id)
+        data = await self._call("MobileGetWifiMetrics", payload)
+        return self._parse_wifi_metrics(data)
 
-    async def get_grid_status(self) -> dict:
-        """MobileGetGridStatus — outage / grid connection status."""
-        raw = await self._call("MobileGetGridStatus", self._location_payload())
-        return _parse_grid_status(raw)
+    async def get_usage_cycles(self, service_location_id: str) -> dict[str, Any]:
+        """Get usage cycle dates and asset ID."""
+        payload = _encode_service_location_request(service_location_id)
+        data = await self._call("MobileGetUsageCycles", payload)
+        return self._parse_usage_cycles(data)
 
-    async def get_recent_usage(self) -> dict:
-        """MobileGetRecentUsage — 15-min interval energy readings for today."""
-        raw = await self._call("MobileGetRecentUsage", self._location_payload())
-        return _parse_recent_usage(raw)
-
-    async def get_billing_accounts(self) -> dict:
-        """MobileGetBillingAccounts — billing amounts and account status."""
-        raw = await self._call("MobileGetBillingAccounts", self._location_payload())
-        return _parse_billing(raw)
-
-    async def get_usage_cycles(self) -> dict:
-        """MobileGetUsageCycles — billing cycle dates and asset ID."""
-        raw = await self._call("MobileGetUsageCycles", self._location_payload())
-        return _parse_usage_cycles(raw)
-
-
-
-# ---------------------------------------------------------------------------
-# Protobuf response parsers
-# ---------------------------------------------------------------------------
-
-def _parse_user(data: bytes) -> dict:
-    result: dict = {}
-    offset = 0
-    field_map = {2: "email", 3: "first_name", 4: "last_name", 5: "phone", 6: "language"}
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 0:
-                value, offset = _read_varint(data, offset)
-                if field == 1:
-                    result["user_id"] = value
-            elif wire == 2:
-                length, offset = _read_varint(data, offset)
-                raw = data[offset : offset + length]
-                offset += length
-                if field in field_map:
-                    result[field_map[field]] = raw.decode("utf-8", errors="replace")
-        except Exception:
-            break
-    return result
-
-
-def _parse_dashboard_roots(data: bytes) -> list[dict]:
-    locations: list[dict] = []
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 2:
-                length, offset = _read_varint(data, offset)
-                sub = data[offset : offset + length]
-                offset += length
-                if field == 1:
-                    loc = _parse_location_entry(sub)
-                    if loc.get("service_location_id"):
-                        locations.append(loc)
-        except Exception:
-            break
-    return locations
-
-
-def _parse_location_entry(data: bytes) -> dict:
-    result: dict = {}
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 2:
-                length, offset = _read_varint(data, offset)
-                raw = data[offset : offset + length]
-                offset += length
-                if field == 1:
-                    result["service_location_id"] = raw.decode("utf-8", errors="replace")
-                elif field == 2:
-                    result["address"] = _parse_address(raw)
-        except Exception:
-            break
-    return result
-
-
-def _parse_address(data: bytes) -> dict:
-    result: dict = {}
-    field_map = {1: "line1", 2: "line2", 3: "city", 4: "state", 5: "postal_code", 6: "country", 8: "timezone"}
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 2:
-                length, offset = _read_varint(data, offset)
-                raw = data[offset : offset + length]
-                offset += length
-                if field in field_map:
-                    result[field_map[field]] = raw.decode("utf-8", errors="replace")
-            elif wire == 0:
-                _, offset = _read_varint(data, offset)
-            elif wire == 5:
-                offset += 4
-            elif wire == 1:
-                offset += 8
-        except Exception:
-            break
-    return result
-
-
-def _parse_dashboard_root(data: bytes) -> dict:
-    result: dict = {
-        "battery_status": 0,
-        "battery_status_name": BATTERY_STATUS.get(0, "unknown"),
-        "service_state": 0,
-        "service_state_name": SERVICE_STATE.get(0, "unknown"),
-        "has_solar": False,
-        "has_automatic_backup": False,
-        "grid_to_home_kwh": None,
-        "solar_to_home_kwh": None,
-        "energy_to_home_kwh": None,
-        "backup_hours": None,
-        "address": {},
-    }
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 2:
-                length, offset = _read_varint(data, offset)
-                sub = data[offset : offset + length]
-                offset += length
-                if field == 2:
-                    result["address"] = _parse_address(sub)
-                elif field == 3:
-                    _parse_battery_sub(sub, result)
-                elif field == 4:
-                    _parse_energy_sub(sub, result)
-            elif wire == 0:
-                value, offset = _read_varint(data, offset)
-                # Field 7 = backup_seconds_remaining (confirmed via API testing)
-                # The app displays this as "X hours of backup power remaining"
-                if field == 7:
-                    result["backup_hours"] = round(value / 3600, 2)
-            elif wire == 5:
-                offset += 4
-            elif wire == 1:
-                offset += 8
-        except Exception:
-            break
-    return result
-
-
-def _parse_battery_sub(data: bytes, result: dict) -> None:
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 0:
-                value, offset = _read_varint(data, offset)
-                if field == 1:
-                    result["battery_status"] = value
-                    result["battery_status_name"] = BATTERY_STATUS.get(value, "unknown")
-                elif field == 2:
-                    result["service_state"] = value
-                    result["service_state_name"] = SERVICE_STATE.get(value, "unknown")
-                elif field == 4:
-                    result["has_solar"] = bool(value)
-                elif field == 5:
-                    result["has_automatic_backup"] = bool(value)
-            elif wire == 2:
-                length, offset = _read_varint(data, offset)
-                offset += length
-            elif wire == 5:
-                offset += 4
-        except Exception:
-            break
-
-
-def _parse_energy_sub(data: bytes, result: dict) -> None:
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 5:  # float32, little-endian
-                value = struct.unpack("<f", data[offset : offset + 4])[0]
-                offset += 4
-                if field == 1:
-                    result["grid_to_home_kwh"] = round(value, 3)
-                elif field == 2:
-                    result["solar_to_home_kwh"] = round(value, 3)
-                elif field == 3:
-                    result["energy_to_home_kwh"] = round(value, 3)
-            elif wire == 0:
-                _, offset = _read_varint(data, offset)
-            elif wire == 2:
-                length, offset = _read_varint(data, offset)
-                offset += length
-            elif wire == 1:
-                offset += 8
-        except Exception:
-            break
-
-
-def _parse_recent_usage(data: bytes) -> dict:
-    points: list[dict] = []
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 2:
-                length, offset = _read_varint(data, offset)
-                sub = data[offset : offset + length]
-                offset += length
-                if field == 1:
-                    point = _parse_usage_point(sub)
-                    if point is not None:
-                        points.append(point)
-            elif wire == 0:
-                _, offset = _read_varint(data, offset)
-        except Exception:
-            break
-
-    if not points:
-        return {
-            "data_points": [],
-            "current_interval_kwh": 0.0,
-            "current_power_watts": 0,
-            "daily_total_kwh": 0.0,
-            "daily_peak_kwh": 0.0,
-            "daily_low_kwh": 0.0,
-            "intervals_today": 0,
+    @staticmethod
+    def _parse_dashboard_root(data: bytes) -> dict[str, Any]:
+        """Parse MobileGetDashboardRoot response."""
+        result: dict[str, Any] = {
+            "backup_seconds": 0,
+            "backup_hours": 0.0,
+            "battery_status": 0,
+            "service_state": 0,
+            "has_solar": False,
         }
+        if not data:
+            return result
 
-    values = [p["kwh"] for p in points]
-    return {
-        "data_points": points,
-        "current_interval_kwh": values[-1],
-        "current_power_watts": round(values[-1] * 4 * 1000),  # kWh/15min → Watts
-        "daily_total_kwh": round(sum(values), 3),
-        "daily_peak_kwh": max(values),
-        "daily_low_kwh": min(values),
-        "intervals_today": len(values),
-    }
+        offset = 0
+        while offset < len(data):
+            tag = data[offset]
+            field_num = tag >> 3
+            wire_type = tag & 0x07
+            offset += 1
 
+            if field_num == 7 and wire_type == 0:
+                # Backup seconds remaining (varint)
+                val, offset = _decode_varint(data, offset)
+                result["backup_seconds"] = val
+                result["backup_hours"] = round(val / 3600, 2)
+            elif field_num == 3 and wire_type == 2:
+                # Status sub-message
+                msg_len, offset = _decode_varint(data, offset)
+                end = offset + msg_len
+                while offset < end:
+                    inner_tag = data[offset]
+                    inner_field = inner_tag >> 3
+                    offset += 1
+                    inner_val, offset = _decode_varint(data, offset)
+                    if inner_field == 1:
+                        result["battery_status"] = inner_val
+                    elif inner_field == 2:
+                        result["service_state"] = inner_val
+                    elif inner_field == 4:
+                        result["has_solar"] = bool(inner_val)
+            else:
+                offset = _skip_field(data, offset, wire_type)
 
-def _parse_usage_point(data: bytes) -> dict | None:
-    timestamp = None
-    kwh = None
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 2 and field == 1:  # Timestamp message
-                length, offset = _read_varint(data, offset)
-                ts_data = data[offset : offset + length]
-                offset += length
-                # Timestamp.seconds is field 1 (varint) inside the message
-                if ts_data and ts_data[0] == 0x08:
-                    ts, _ = _read_varint(ts_data, 1)
-                    timestamp = ts
-            elif wire == 5 and field == 2:  # float32 kWh value
-                kwh = round(struct.unpack("<f", data[offset : offset + 4])[0], 3)
-                offset += 4
-            elif wire == 0:
-                _, offset = _read_varint(data, offset)
-            elif wire == 2:
-                length, offset = _read_varint(data, offset)
-                offset += length
-        except Exception:
-            break
-
-    if kwh is not None:
-        return {"timestamp": timestamp, "kwh": kwh}
-    return None
-
-
-def _parse_grid_status(data: bytes) -> dict:
-    result = {
-        "grid_connected": True,
-        "outage_active": False,
-        "backup_active": False,
-    }
-    if not data:
         return result
 
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 0:
-                value, offset = _read_varint(data, offset)
-                if field == 1:
-                    result["grid_connected"] = value == 1
-                elif field == 2:
-                    result["outage_active"] = value == 1
-                elif field == 3:
-                    result["backup_active"] = value == 1
-            elif wire == 2:
-                length, offset = _read_varint(data, offset)
-                offset += length
-            elif wire == 5:
-                offset += 4
-            elif wire == 1:
-                offset += 8
-        except Exception:
-            break
-    return result
+    @staticmethod
+    def _parse_recent_usage(data: bytes) -> list[dict[str, Any]]:
+        """Parse MobileGetRecentUsage response.
 
+        Each entry is 15 bytes:
+          0A 0D (field 1, len 13)
+          0A 06 08 XX XX XX XX XX (Timestamp varint)
+          15 XX XX XX XX (float32, little-endian)
+        """
+        points: list[dict[str, Any]] = []
+        if not data:
+            return points
 
-def _parse_billing(data: bytes) -> dict:
-    result: dict = {
-        "total_amount_cents": None,
-        "monthly_fee_cents": None,
-        "account_status": 0,
-        "solar_buyback_rate_cents": None,
-    }
-    if not data:
+        offset = 0
+        while offset < len(data) - 14:
+            if data[offset] != 0x0A or data[offset + 1] != 0x0D:
+                break
+
+            # Decode timestamp varint at offset+5
+            ts = 0
+            shift = 0
+            for i in range(5):
+                b = data[offset + 5 + i]
+                ts |= (b & 0x7F) << shift
+                shift += 7
+                if not (b & 0x80):
+                    break
+
+            # Decode float32 at offset+11 (little-endian)
+            kwh = struct.unpack("<f", data[offset + 11 : offset + 15])[0]
+
+            points.append(
+                {
+                    "timestamp": ts,
+                    "kwh": round(kwh, 3),
+                    "watts": round(kwh * 4000),
+                }
+            )
+            offset += 15
+
+        return points
+
+    @staticmethod
+    def _parse_wifi_metrics(data: bytes) -> dict[str, Any]:
+        """Parse MobileGetWifiMetrics response."""
+        result: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
+        if not data or len(data) < 4:
+            return result
+
+        if data[0] == 0x0A:
+            inner_len = data[1]
+            inner = data[2 : 2 + inner_len]
+            if inner[0] == 0x0A:
+                ssid_len = inner[1]
+                result["ssid"] = inner[2 : 2 + ssid_len].decode("utf-8")
+                sig_offset = 2 + ssid_len
+                if sig_offset < len(inner) and inner[sig_offset] == 0x10:
+                    result["signal"] = inner[sig_offset + 1]
+            result["connected"] = True
+
         return result
 
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 0:
-                value, offset = _read_varint(data, offset)
-                if field == 1:
-                    result["total_amount_cents"] = value
-                elif field == 2:
-                    result["monthly_fee_cents"] = value
-                elif field == 3:
-                    result["account_status"] = value
-                elif field == 10:
-                    result["solar_buyback_rate_cents"] = value
-            elif wire == 2:
-                length, offset = _read_varint(data, offset)
-                offset += length
-            elif wire == 5:
-                offset += 4
-            elif wire == 1:
-                offset += 8
-        except Exception:
-            break
-    return result
+    @staticmethod
+    def _parse_usage_cycles(data: bytes) -> dict[str, Any]:
+        """Parse MobileGetUsageCycles response for asset_id."""
+        result: dict[str, Any] = {"asset_id": None}
+        if not data:
+            return result
 
+        offset = 0
+        while offset < len(data):
+            if data[offset] == 0x12:  # field 2 (asset_id string)
+                str_len = data[offset + 1]
+                result["asset_id"] = data[offset + 2 : offset + 2 + str_len].decode(
+                    "utf-8"
+                )
+                break
+            elif data[offset] == 0x0A:  # field 1 (cycle entry), skip it
+                entry_len = data[offset + 1]
+                offset += 2 + entry_len
+            else:
+                offset += 1
 
-def _parse_usage_cycles(data: bytes) -> dict:
-    result: dict = {"asset_id": None, "cycles": []}
-    if not data:
         return result
-
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = _read_varint(data, offset)
-            field = tag >> 3
-            wire = tag & 0x7
-            if wire == 2:
-                length, offset = _read_varint(data, offset)
-                raw = data[offset : offset + length]
-                offset += length
-                if field == 2:  # asset_id string at root level
-                    result["asset_id"] = raw.decode("utf-8", errors="replace")
-            elif wire == 0:
-                _, offset = _read_varint(data, offset)
-        except Exception:
-            break
-    return result
