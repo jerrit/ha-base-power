@@ -9,12 +9,13 @@
 
 Unofficial Home Assistant integration for [Base Power](https://basepowercompany.com/) home battery systems. This project is not affiliated with or endorsed by Base Power.
 
-> **25 kWh home battery** — Monitor your battery level, power usage, backup time, and energy consumption directly in Home Assistant.
+> Monitor your Base Power battery level, power usage, backup time, and energy consumption directly in Home Assistant. Supports single and dual battery configurations (25 kWh per unit).
 
 ## Features
 
-- **Battery Level** — Estimated battery percentage derived from backup time
+- **Battery Level** — Estimated battery percentage (self-calibrating)
 - **Backup Time** — Hours of backup power remaining
+- **System Capacity** — Auto-detected from API (25 kWh × battery count)
 - **Current Power** — Real-time power consumption (watts)
 - **Energy Monitoring** — 15-minute interval energy data compatible with HA Energy Dashboard
 - **Daily Statistics** — Peak, low, and total daily energy consumption
@@ -52,6 +53,8 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 |--------|-------------|------|
 | Battery Level | Estimated state of charge | % |
 | Battery Backup Time | Hours of backup remaining | hours |
+| Battery Count | Number of battery units detected | — |
+| System Capacity | Total capacity (count × 25 kWh) | kWh |
 | Current Power | Current power draw | W |
 | Current Interval Energy | Energy for current 15-min period | kWh |
 | Daily Peak | Highest 15-min interval today | kWh |
@@ -74,8 +77,9 @@ The **Daily Total Energy** sensor uses `state_class: total_increasing` and is co
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime)
-- **Polling Interval**: 5 minutes (configurable)
-- **Battery**: 25 kWh capacity system
+- **Polling Interval**: 5 minutes
+- **Battery**: 25 kWh per unit, auto-detects 1 or 2 battery configurations
+- **Battery %**: Self-calibrating — tracks max backup time seen as 100% reference
 
 ## Troubleshooting
 
