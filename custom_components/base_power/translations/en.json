@@ -1,0 +1,43 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Base Power",
+        "description": "Enter the email address associated with your Base Power account. We'll send a one-time code to verify your identity.",
+        "data": {
+          "email": "Email address"
+        }
+      },
+      "verify_code": {
+        "title": "Verify your identity",
+        "description": "Enter the 6-digit code sent to {email}.",
+        "data": {
+          "code": "Verification code"
+        }
+      },
+      "select_location": {
+        "title": "Select your Base Power location",
+        "description": "Multiple service locations were found on your account. Select the one you want to monitor.",
+        "data": {
+          "service_location_id": "Service location"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate with Base Power",
+        "description": "Your session has expired. Please sign in again to continue receiving data.",
+        "data": {
+          "email": "Email address"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to Base Power. Check your internet connection and try again.",
+      "invalid_auth": "Could not start sign-in. Make sure this email is registered with Base Power.",
+      "invalid_code": "The verification code was incorrect or has expired. Request a new code by starting setup again.",
+      "no_locations": "No service locations found on this account. Contact Base Power support if this is unexpected."
+    },
+    "abort": {
+      "already_configured": "This Base Power location is already configured."
+    }
+  }
+}
