@@ -28,8 +28,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Base Power from a config entry."""
     session = async_get_clientsession(hass)
 
+    # Use a dedicated session for Clerk auth (HA's shared session interferes)
+    clerk_session = aiohttp.ClientSession()
+
     auth = BasePowerAuth(
-        session=session,
+        session=clerk_session,
         client_token=entry.data[CONF_CLIENT_TOKEN],
         session_id=entry.data[CONF_SESSION_ID],
     )
@@ -47,6 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
+    hass.data[DOMAIN][f"{entry.entry_id}_clerk_session"] = clerk_session
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -57,5 +61,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        clerk_session = hass.data[DOMAIN].pop(f"{entry.entry_id}_clerk_session", None)
+        if clerk_session:
+            await clerk_session.close()
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok

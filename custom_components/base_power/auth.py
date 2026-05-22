@@ -54,15 +54,21 @@ class BasePowerAuth:
             f"{CLERK_DOMAIN}/v1/client/sessions/"
             f"{self._session_id}/tokens?_clerk_js_version={CLERK_JS_VERSION}"
         )
+        headers = {**_CLERK_HEADERS, "Authorization": self._client_token}
         cookies = {"__client": self._client_token}
 
-        async with self._session.post(url, headers=_CLERK_HEADERS, cookies=cookies) as resp:
+        # Try with Authorization header first, then cookie
+        async with self._session.post(url, headers=headers, cookies=cookies) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 _LOGGER.error("Failed to refresh JWT: %s %s", resp.status, text)
                 raise AuthenticationError(
                     f"Clerk token refresh failed: {resp.status}"
                 )
+            # Update client token if Clerk rotates it
+            new_token = resp.headers.get("Authorization")
+            if new_token:
+                self._client_token = new_token
             data = await resp.json()
             self._jwt = data["jwt"]
             self._jwt_expires_at = time.time() + JWT_LIFETIME - JWT_REFRESH_BUFFER

@@ -98,6 +98,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._client_token,
                     )
                     self._session_id = result["session_id"]
+                    self._client_token = result["client_token"]
                     return await self.async_step_location()
             except AuthenticationError:
                 errors["base"] = "invalid_code"
