@@ -1,4 +1,5 @@
 """Config flow for Base Power integration."""
+
 from __future__ import annotations
 
 import logging
@@ -8,231 +9,141 @@ import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.const import CONF_EMAIL
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import BasePowerAPI
-from .auth import ClerkAuth, ClerkAuthError
 from .const import (
-    CONF_CLIENT_TOKEN,
-    CONF_EMAIL,
-    CONF_SERVICE_LOCATION_ID,
-    CONF_SERVICE_LOCATION_NAME,
-    CONF_SESSION_ID,
     DOMAIN,
+    CONF_CLIENT_TOKEN,
+    CONF_SESSION_ID,
+    CONF_SERVICE_LOCATION_ID,
 )
+from .auth import BasePowerAuth, AuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
 
+CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuYmFzZXBvd2VyY29tcGFueS5jb20k"
+
 
 class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Multi-step config flow: email → OTP → (optional) location select."""
+    """Handle a config flow for Base Power."""
 
     VERSION = 1
 
     def __init__(self) -> None:
+        """Initialize flow."""
         self._email: str = ""
-        self._auth: ClerkAuth | None = None
-        self._locations: list[dict] = []
+        self._sign_in_id: str = ""
+        self._email_id: str = ""
+        self._client_token: str = ""
+        self._session_id: str = ""
 
-    # ------------------------------------------------------------------
-    # Step 1 — email address
-    # ------------------------------------------------------------------
-
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Collect the user's Base Power email address."""
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 1: Get email address and initiate sign-in."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            self._email = user_input[CONF_EMAIL].strip()
+            self._email = user_input[CONF_EMAIL]
             session = async_get_clientsession(self.hass)
-            self._auth = ClerkAuth(session)
 
             try:
-                sent = await self._auth.initiate_sign_in(self._email)
+                result = await BasePowerAuth.async_initiate_sign_in(
+                    session, self._email, CLERK_PUBLISHABLE_KEY
+                )
+                self._sign_in_id = result["sign_in_id"]
+                self._email_id = result["email_id"]
+                self._client_token = result["client_token"]
+
+                # Send OTP code
+                await BasePowerAuth.async_prepare_first_factor(
+                    session,
+                    self._sign_in_id,
+                    self._email_id,
+                    self._client_token,
+                )
+                return await self.async_step_verify_code()
+            except AuthenticationError:
+                errors["base"] = "auth_failed"
             except Exception:
-                _LOGGER.exception("Unexpected error during sign-in initiation")
-                errors["base"] = "cannot_connect"
-            else:
-                if sent:
-                    return await self.async_step_verify_code()
-                errors["base"] = "invalid_auth"
+                _LOGGER.exception("Unexpected error during sign-in")
+                errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({vol.Required(CONF_EMAIL): str}),
             errors=errors,
-            description_placeholders={},
         )
-
-    # ------------------------------------------------------------------
-    # Step 2 — OTP verification
-    # ------------------------------------------------------------------
 
     async def async_step_verify_code(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Ask the user for the 6-digit code sent to their email."""
+    ) -> config_entries.ConfigFlowResult:
+        """Step 2: Verify the OTP code from email."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            code = user_input["code"].strip()
+            code = user_input["code"]
+            session = async_get_clientsession(self.hass)
+
             try:
-                verified = await self._auth.verify_otp(code)
-            except Exception:
-                _LOGGER.exception("Unexpected error during OTP verification")
-                errors["base"] = "cannot_connect"
-            else:
-                if verified:
-                    return await self._async_finish_auth()
+                result = await BasePowerAuth.async_attempt_first_factor(
+                    session,
+                    self._sign_in_id,
+                    code,
+                    self._client_token,
+                )
+                self._session_id = result["session_id"]
+                self._client_token = result["client_token"]
+
+                return await self.async_step_location()
+            except AuthenticationError:
                 errors["base"] = "invalid_code"
+            except Exception:
+                _LOGGER.exception("Unexpected error during verification")
+                errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="verify_code",
             data_schema=vol.Schema({vol.Required("code"): str}),
-            errors=errors,
             description_placeholders={"email": self._email},
+            errors=errors,
         )
 
-    # ------------------------------------------------------------------
-    # Step 3 — location select (only shown when multiple locations exist)
-    # ------------------------------------------------------------------
-
-    async def async_step_select_location(
+    async def async_step_location(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Let the user pick which Base Power location to monitor."""
+    ) -> config_entries.ConfigFlowResult:
+        """Step 3: Enter or confirm service location ID."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            location_id = user_input[CONF_SERVICE_LOCATION_ID]
-            location_name = next(
-                (
-                    _format_location_name(loc)
-                    for loc in self._locations
-                    if loc["service_location_id"] == location_id
-                ),
-                location_id,
-            )
-            return self._create_entry(location_id, location_name)
+            service_location_id = user_input[CONF_SERVICE_LOCATION_ID]
 
-        location_options = {
-            loc["service_location_id"]: _format_location_name(loc)
-            for loc in self._locations
-        }
+            # Set unique ID to prevent duplicates
+            await self.async_set_unique_id(service_location_id)
+            self._abort_if_unique_id_configured()
+
+            return self.async_create_entry(
+                title=f"Base Power ({service_location_id})",
+                data={
+                    CONF_EMAIL: self._email,
+                    CONF_CLIENT_TOKEN: self._client_token,
+                    CONF_SESSION_ID: self._session_id,
+                    CONF_SERVICE_LOCATION_ID: service_location_id,
+                },
+            )
 
         return self.async_show_form(
-            step_id="select_location",
+            step_id="location",
             data_schema=vol.Schema(
-                {vol.Required(CONF_SERVICE_LOCATION_ID): vol.In(location_options)}
+                {vol.Required(CONF_SERVICE_LOCATION_ID): str}
             ),
             errors=errors,
         )
 
-    # ------------------------------------------------------------------
-    # Re-auth flow — triggered when a stored session expires
-    # ------------------------------------------------------------------
-
-    async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
-        """Initiate re-authentication."""
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> config_entries.ConfigFlowResult:
+        """Handle reauthentication."""
         self._email = entry_data.get(CONF_EMAIL, "")
-        return await self.async_step_reauth_confirm()
-
-    async def async_step_reauth_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Show a form prompting the user to sign in again."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            email = user_input.get(CONF_EMAIL, self._email).strip()
-            self._email = email
-            session = async_get_clientsession(self.hass)
-            self._auth = ClerkAuth(session)
-
-            try:
-                sent = await self._auth.initiate_sign_in(self._email)
-            except Exception:
-                errors["base"] = "cannot_connect"
-            else:
-                if sent:
-                    return await self.async_step_verify_code()
-                errors["base"] = "invalid_auth"
-
-        return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_EMAIL, default=self._email): str}
-            ),
-            errors=errors,
-            description_placeholders={"email": self._email},
-        )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _async_finish_auth(self) -> FlowResult:
-        """Auth is complete — fetch locations and route to next step."""
-        try:
-            jwt = await self._auth.refresh_jwt()
-        except ClerkAuthError as err:
-            _LOGGER.error("Could not get JWT after successful OTP: %s", err)
-            return self.async_show_form(
-                step_id="verify_code",
-                data_schema=vol.Schema({vol.Required("code"): str}),
-                errors={"base": "cannot_connect"},
-                description_placeholders={"email": self._email},
-            )
-
-        session = async_get_clientsession(self.hass)
-
-        # Fetch locations using a temporary API client with a placeholder location ID
-        # (get_service_locations uses an Empty request — no location ID needed)
-        temp_api = BasePowerAPI(session, self._auth, "")
-        try:
-            self._locations = await temp_api.get_service_locations()
-        except Exception as err:
-            _LOGGER.warning("Could not fetch service locations: %s", err)
-            self._locations = []
-
-        if len(self._locations) == 0:
-            _LOGGER.error("No service locations returned from Base Power API")
-            return self.async_show_form(
-                step_id="user",
-                data_schema=vol.Schema({vol.Required(CONF_EMAIL): str}),
-                errors={"base": "no_locations"},
-            )
-
-        if len(self._locations) == 1:
-            loc = self._locations[0]
-            return self._create_entry(
-                loc["service_location_id"], _format_location_name(loc)
-            )
-
-        return await self.async_step_select_location()
-
-    def _create_entry(self, location_id: str, location_name: str) -> FlowResult:
-        """Persist the config entry with the gathered credentials."""
-        return self.async_create_entry(
-            title=location_name,
-            data={
-                CONF_EMAIL: self._email,
-                CONF_CLIENT_TOKEN: self._auth.client_token,
-                CONF_SESSION_ID: self._auth.session_id,
-                CONF_SERVICE_LOCATION_ID: location_id,
-                CONF_SERVICE_LOCATION_NAME: location_name,
-            },
-        )
-
-
-def _format_location_name(loc: dict) -> str:
-    """Turn a location dict into a human-readable label."""
-    address = loc.get("address", {})
-    parts = [
-        address.get("line1"),
-        address.get("city"),
-        address.get("state"),
-    ]
-    label = ", ".join(p for p in parts if p)
-    return label or loc.get("service_location_id", "Unknown location")
+        return await self.async_step_user()

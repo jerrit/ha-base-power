@@ -2,42 +2,34 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Base Power",
-        "description": "Enter the email address associated with your Base Power account. We'll send a one-time code to verify your identity.",
+        "title": "Base Power Login",
+        "description": "Enter your Base Power account email address.",
         "data": {
-          "email": "Email address"
+          "email": "Email"
         }
       },
       "verify_code": {
-        "title": "Verify your identity",
-        "description": "Enter the 6-digit code sent to {email}.",
+        "title": "Verify Code",
+        "description": "A verification code was sent to {email}. Enter it below.",
         "data": {
-          "code": "Verification code"
+          "code": "Verification Code"
         }
       },
-      "select_location": {
-        "title": "Select your Base Power location",
-        "description": "Multiple service locations were found on your account. Select the one you want to monitor.",
+      "location": {
+        "title": "Service Location",
+        "description": "Enter your Base Power service location ID (found in the app settings).",
         "data": {
-          "service_location_id": "Service location"
-        }
-      },
-      "reauth_confirm": {
-        "title": "Re-authenticate with Base Power",
-        "description": "Your session has expired. Please sign in again to continue receiving data.",
-        "data": {
-          "email": "Email address"
+          "service_location_id": "Service Location ID"
         }
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect to Base Power. Check your internet connection and try again.",
-      "invalid_auth": "Could not start sign-in. Make sure this email is registered with Base Power.",
-      "invalid_code": "The verification code was incorrect or has expired. Request a new code by starting setup again.",
-      "no_locations": "No service locations found on this account. Contact Base Power support if this is unexpected."
+      "auth_failed": "Authentication failed. Please check your email and try again.",
+      "invalid_code": "Invalid verification code. Please try again.",
+      "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This Base Power location is already configured."
+      "already_configured": "This service location is already configured."
     }
   }
 }

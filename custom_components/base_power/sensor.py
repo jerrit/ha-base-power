@@ -1,141 +1,25 @@
-"""Sensor entities for Base Power."""
-from __future__ import annotations
+"""Sensor entities for Base Power integration."""
 
-import logging
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from __future__ import annotations
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
-    SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfPower, UnitOfTime
+from homeassistant.const import (
+    UnitOfEnergy,
+    UnitOfPower,
+    UnitOfTime,
+    PERCENTAGE,
+)
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import ACCOUNT_STATUS, BATTERY_STATUS, DOMAIN, SERVICE_STATE
+from .const import DOMAIN, CONF_SERVICE_LOCATION_ID
 from .coordinator import BasePowerCoordinator
-
-_LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, kw_only=True)
-class BasePowerSensorDescription(SensorEntityDescription):
-    """Extends SensorEntityDescription with a value extractor."""
-
-    value_fn: Callable[[dict], Any]
-
-
-# ---------------------------------------------------------------------------
-# Sensor definitions
-# ---------------------------------------------------------------------------
-
-SENSOR_DESCRIPTIONS: tuple[BasePowerSensorDescription, ...] = (
-    # --- Energy (current 15-min interval) ---
-    BasePowerSensorDescription(
-        key="current_interval_kwh",
-        name="Current Interval Energy",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        icon="mdi:lightning-bolt",
-        value_fn=lambda d: d.get("usage", {}).get("current_interval_kwh"),
-    ),
-    # --- Power (derived: kWh/15min → Watts) ---
-    BasePowerSensorDescription(
-        key="current_power_watts",
-        name="Current Power",
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfPower.WATT,
-        icon="mdi:flash",
-        value_fn=lambda d: d.get("usage", {}).get("current_power_watts"),
-    ),
-    # --- Daily totals ---
-    BasePowerSensorDescription(
-        key="daily_total_kwh",
-        name="Daily Total Energy",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        icon="mdi:counter",
-        value_fn=lambda d: d.get("usage", {}).get("daily_total_kwh"),
-    ),
-    BasePowerSensorDescription(
-        key="daily_peak_kwh",
-        name="Daily Peak Interval",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        icon="mdi:chart-bar",
-        value_fn=lambda d: d.get("usage", {}).get("daily_peak_kwh"),
-    ),
-    BasePowerSensorDescription(
-        key="intervals_today",
-        name="Intervals Today",
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement="intervals",
-        icon="mdi:calendar-clock",
-        value_fn=lambda d: d.get("usage", {}).get("intervals_today"),
-    ),
-    # --- Dashboard / battery ---
-    BasePowerSensorDescription(
-        key="battery_status",
-        name="Battery Status",
-        icon="mdi:battery-heart-variant",
-        value_fn=lambda d: d.get("dashboard", {}).get("battery_status_name"),
-    ),
-    BasePowerSensorDescription(
-        key="service_state",
-        name="Service State",
-        icon="mdi:home-lightning-bolt",
-        value_fn=lambda d: d.get("dashboard", {}).get("service_state_name"),
-    ),
-    # --- Battery runtime estimate ---
-    BasePowerSensorDescription(
-        key="backup_hours",
-        name="Battery Backup Hours Remaining",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.HOURS,
-        icon="mdi:battery-clock",
-        value_fn=lambda d: d.get("dashboard", {}).get("backup_hours"),
-    ),
-    # --- Grid energy flows (populated when system matures) ---
-    BasePowerSensorDescription(
-        key="grid_to_home_kwh",
-        name="Grid to Home Energy",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        icon="mdi:transmission-tower-import",
-        value_fn=lambda d: d.get("dashboard", {}).get("grid_to_home_kwh"),
-    ),
-    BasePowerSensorDescription(
-        key="solar_to_home_kwh",
-        name="Solar to Home Energy",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        icon="mdi:solar-power",
-        value_fn=lambda d: d.get("dashboard", {}).get("solar_to_home_kwh"),
-    ),
-    BasePowerSensorDescription(
-        key="energy_to_home_kwh",
-        name="Total Energy to Home",
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        icon="mdi:home-import-outline",
-        value_fn=lambda d: d.get("dashboard", {}).get("energy_to_home_kwh"),
-    ),
-)
 
 
 async def async_setup_entry(
@@ -143,43 +27,212 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Base Power sensors."""
+    """Set up Base Power sensors from a config entry."""
     coordinator: BasePowerCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        BasePowerSensor(coordinator, entry, description)
-        for description in SENSOR_DESCRIPTIONS
-    )
+    service_location_id = entry.data[CONF_SERVICE_LOCATION_ID]
+
+    entities = [
+        BasePowerBackupHoursSensor(coordinator, entry),
+        BasePowerBatteryPercentSensor(coordinator, entry),
+        BasePowerCurrentPowerSensor(coordinator, entry),
+        BasePowerCurrentEnergySensor(coordinator, entry),
+        BasePowerDailyPeakSensor(coordinator, entry),
+        BasePowerDailyLowSensor(coordinator, entry),
+        BasePowerDailyTotalSensor(coordinator, entry),
+        BasePowerIntervalCountSensor(coordinator, entry),
+    ]
+
+    async_add_entities(entities)
 
 
-class BasePowerSensor(CoordinatorEntity[BasePowerCoordinator], SensorEntity):
-    """A sensor entity backed by the Base Power coordinator."""
+class BasePowerSensorBase(CoordinatorEntity[BasePowerCoordinator], SensorEntity):
+    """Base class for Base Power sensors."""
 
-    entity_description: BasePowerSensorDescription
     _attr_has_entity_name = True
 
     def __init__(
         self,
         coordinator: BasePowerCoordinator,
         entry: ConfigEntry,
-        description: BasePowerSensorDescription,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(coordinator)
-        self.entity_description = description
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_device_info = _device_info(entry)
+        self._entry = entry
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.data[CONF_SERVICE_LOCATION_ID])},
+            "name": f"Base Power {entry.data[CONF_SERVICE_LOCATION_ID]}",
+            "manufacturer": "Base Power",
+            "model": "Home Battery System",
+        }
+
+
+class BasePowerBackupHoursSensor(BasePowerSensorBase):
+    """Sensor for battery backup hours remaining."""
+
+    _attr_name = "Battery Backup Time"
+    _attr_native_unit_of_measurement = UnitOfTime.HOURS
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-clock"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_backup_hours"
 
     @property
-    def native_value(self) -> Any:
-        if self.coordinator.data is None:
-            return None
-        return self.entity_description.value_fn(self.coordinator.data)
+    def native_value(self) -> float | None:
+        """Return backup hours remaining."""
+        if self.coordinator.data:
+            return self.coordinator.data["dashboard"].get("backup_hours")
+        return None
 
 
-def _device_info(entry: ConfigEntry) -> DeviceInfo:
-    return DeviceInfo(
-        identifiers={(DOMAIN, entry.data.get("service_location_id", entry.entry_id))},
-        name=entry.title,
-        manufacturer="Base Power",
-        model="Home Battery System",
-        configuration_url="https://basepowercompany.com",
-    )
+class BasePowerBatteryPercentSensor(BasePowerSensorBase):
+    """Sensor for estimated battery percentage."""
+
+    _attr_name = "Battery Level"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_battery_percent"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return estimated battery percentage."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("battery_percent")
+        return None
+
+
+class BasePowerCurrentPowerSensor(BasePowerSensorBase):
+    """Sensor for current power consumption (watts)."""
+
+    _attr_name = "Current Power"
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:flash"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_current_power"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return current power in watts."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("current_power_watts")
+        return None
+
+
+class BasePowerCurrentEnergySensor(BasePowerSensorBase):
+    """Sensor for current 15-min interval energy."""
+
+    _attr_name = "Current Interval Energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_current_energy"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return current interval kWh."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("current_kwh")
+        return None
+
+
+class BasePowerDailyPeakSensor(BasePowerSensorBase):
+    """Sensor for daily peak energy interval."""
+
+    _attr_name = "Daily Peak"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:arrow-up-bold"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_daily_peak"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return daily peak kWh interval."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("daily_peak_kwh")
+        return None
+
+
+class BasePowerDailyLowSensor(BasePowerSensorBase):
+    """Sensor for daily low energy interval."""
+
+    _attr_name = "Daily Low"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:arrow-down-bold"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_daily_low"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return daily low kWh interval."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("daily_low_kwh")
+        return None
+
+
+class BasePowerDailyTotalSensor(BasePowerSensorBase):
+    """Sensor for daily total energy consumption."""
+
+    _attr_name = "Daily Total Energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:sigma"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_daily_total"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return daily total kWh."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("daily_total_kwh")
+        return None
+
+
+class BasePowerIntervalCountSensor(BasePowerSensorBase):
+    """Sensor for number of usage intervals today."""
+
+    _attr_name = "Intervals Today"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:counter"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_intervals"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return number of intervals."""
+        if self.coordinator.data:
+            return self.coordinator.data["derived"].get("intervals_today")
+        return None
