@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import struct
 import logging
-import json
-import os
 from typing import Any
 
 import aiohttp
@@ -13,9 +11,6 @@ import aiohttp
 from .const import API_HOST, API_SERVICE, API_CONTENT_TYPE
 
 _LOGGER = logging.getLogger(__name__)
-
-# Debug dump path - writes raw API responses to this file
-DEBUG_DUMP_PATH = "/config/base_power_debug.json"
 
 
 def _build_grpc_frame(payload: bytes) -> bytes:

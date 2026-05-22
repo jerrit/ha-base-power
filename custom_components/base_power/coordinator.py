@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
+import os
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from .api import BasePowerApiClient, DEBUG_DUMP_PATH
+from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
 from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT
 
@@ -70,8 +71,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Write debug dump of raw API responses
             try:
+                dump_path = self.hass.config.path("base_power_debug.json")
                 dump = {
-                    "timestamp": str(self.hass.helpers.event.utcnow()),
+                    "timestamp": datetime.now().isoformat(),
                     "raw_hex": self.api.raw_responses,
                     "parsed": {
                         "dashboard": dashboard,
@@ -84,11 +86,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "last_usage": usage[-1] if usage else None,
                     },
                 }
-                with open(DEBUG_DUMP_PATH, "w") as f:
+                with open(dump_path, "w") as f:
                     json.dump(dump, f, indent=2, default=str)
-                _LOGGER.info("Debug dump written to %s", DEBUG_DUMP_PATH)
+                _LOGGER.warning("Base Power debug dump written to %s", dump_path)
             except Exception as dump_err:
-                _LOGGER.warning("Failed to write debug dump: %s", dump_err)
+                _LOGGER.error("Failed to write debug dump: %s", dump_err)
 
             # Derive additional values
             derived = self._derive_values(dashboard, usage)
