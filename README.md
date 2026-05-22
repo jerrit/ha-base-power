@@ -1,9 +1,15 @@
 # Base Power - Home Assistant Integration (Unofficial)
 
+[![GitHub Release](https://img.shields.io/github/v/release/jerrit/ha-base-power?style=flat-square)](https://github.com/jerrit/ha-base-power/releases)
 [![HACS Validation](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml/badge.svg)](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml)
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=flat-square)](https://github.com/hacs/integration)
+[![License: MIT](https://img.shields.io/github/license/jerrit/ha-base-power?style=flat-square)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/jerrit/ha-base-power?style=flat-square)](https://github.com/jerrit/ha-base-power/stargazers)
+[![HA Version](https://img.shields.io/badge/HA-2024.1%2B-blue?style=flat-square&logo=home-assistant)](https://www.home-assistant.io/)
 
 Unofficial Home Assistant integration for [Base Power](https://basepowercompany.com/) home battery systems. This project is not affiliated with or endorsed by Base Power.
+
+> **25 kWh home battery** — Monitor your battery level, power usage, backup time, and energy consumption directly in Home Assistant.
 
 ## Features
 
@@ -83,6 +89,14 @@ The **Daily Total Energy** sensor uses `state_class: total_increasing` and is co
 
 ### Reauthentication required
 - Clerk sessions can expire. Go to the integration and click **Reconfigure** to re-authenticate.
+
+## Contributing
+
+Contributions are welcome! Please open an issue or PR on [GitHub](https://github.com/jerrit/ha-base-power).
+
+## Disclaimer
+
+This integration communicates with Base Power's private API, which may change without notice. Use at your own risk.
 
 ## License
 
