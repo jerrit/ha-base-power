@@ -76,10 +76,30 @@ The **Daily Total Energy** sensor uses `state_class: total_increasing` and is co
 ## Technical Details
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
-- **Authentication**: Clerk (email OTP → JWT with 60-second lifetime)
+- **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
 - **Polling Interval**: 5 minutes
 - **Battery**: 25 kWh per unit, auto-detects 1 or 2 battery configurations
 - **Battery %**: Self-calibrating — tracks max backup time seen as 100% reference
+
+## Changelog
+
+### v1.3.0
+- Switch to native mobile API authentication pattern (`_is_native=1`)
+- Add `x-mobile` header to match Clerk Expo SDK behavior
+- Remove cookie-based auth in favor of Authorization header
+- Extract session JWT directly from sign-in response when available
+- Improved authentication reliability
+
+### v1.2.0
+- Dedicated Clerk session for auth (separate from HA's shared session)
+- Token rotation tracking through full sign-in flow
+- Debug logging for auth diagnostics
+
+### v1.0.0
+- Initial release with full sensor support
+- Email OTP config flow
+- gRPC-Web API integration
+- Energy Dashboard compatible sensors
 
 ## Troubleshooting
 
