@@ -157,13 +157,6 @@ class BasePowerAPI:
         raw = await self._call("MobileGetUsageCycles", self._location_payload())
         return _parse_usage_cycles(raw)
 
-    async def send_manual_backup(self) -> None:
-        """MobileSendManualBackupCommand — trigger battery backup mode."""
-        await self._call("MobileSendManualBackupCommand", self._location_payload())
-
-    async def send_overcurrent_reset(self) -> None:
-        """MobileSendOverCurrentCommand — reset overcurrent protection."""
-        await self._call("MobileSendOverCurrentCommand", self._location_payload())
 
 
 # ---------------------------------------------------------------------------
