@@ -266,6 +266,7 @@ def _parse_dashboard_root(data: bytes) -> dict:
         "grid_to_home_kwh": None,
         "solar_to_home_kwh": None,
         "energy_to_home_kwh": None,
+        "backup_hours": None,
         "address": {},
     }
     offset = 0
@@ -285,7 +286,11 @@ def _parse_dashboard_root(data: bytes) -> dict:
                 elif field == 4:
                     _parse_energy_sub(sub, result)
             elif wire == 0:
-                _, offset = _read_varint(data, offset)
+                value, offset = _read_varint(data, offset)
+                # Field 7 = backup_seconds_remaining (confirmed via API testing)
+                # The app displays this as "X hours of backup power remaining"
+                if field == 7:
+                    result["backup_hours"] = round(value / 3600, 2)
             elif wire == 5:
                 offset += 4
             elif wire == 1:

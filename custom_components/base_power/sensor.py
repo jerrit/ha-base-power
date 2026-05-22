@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfPower
+from homeassistant.const import UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -96,6 +96,16 @@ SENSOR_DESCRIPTIONS: tuple[BasePowerSensorDescription, ...] = (
         name="Service State",
         icon="mdi:home-lightning-bolt",
         value_fn=lambda d: d.get("dashboard", {}).get("service_state_name"),
+    ),
+    # --- Battery runtime estimate ---
+    BasePowerSensorDescription(
+        key="backup_hours",
+        name="Battery Backup Hours Remaining",
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        icon="mdi:battery-clock",
+        value_fn=lambda d: d.get("dashboard", {}).get("backup_hours"),
     ),
     # --- Grid energy flows (populated when system matures) ---
     BasePowerSensorDescription(
