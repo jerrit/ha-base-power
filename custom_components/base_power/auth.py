@@ -185,9 +185,30 @@ class BasePowerAuth:
             if sessions:
                 session_id = sessions[0].get("id")
 
+            # Log full response structure for discovery debugging
+            _LOGGER.debug(
+                "attempt_first_factor response keys: %s",
+                list(body.keys()),
+            )
+            if sessions:
+                _LOGGER.debug(
+                    "Session keys: %s", list(sessions[0].keys())
+                )
+                user = sessions[0].get("user", {})
+                _LOGGER.debug("User keys: %s", list(user.keys()))
+                _LOGGER.debug(
+                    "User public_metadata: %s",
+                    user.get("public_metadata"),
+                )
+                _LOGGER.debug(
+                    "User unsafe_metadata: %s",
+                    user.get("unsafe_metadata"),
+                )
+
             return {
                 "session_id": session_id,
                 "client_token": new_client_token,
+                "user_data": sessions[0].get("user", {}) if sessions else {},
             }
 
 
