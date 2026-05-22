@@ -180,8 +180,8 @@ class BasePowerCurrentEnergySensor(BasePowerSensorBase):
 
     _attr_name = "Current Interval Energy"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:lightning-bolt"
 
     def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
         """Initialize."""
@@ -201,7 +201,6 @@ class BasePowerDailyPeakSensor(BasePowerSensorBase):
 
     _attr_name = "Daily Peak"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:arrow-up-bold"
 
@@ -223,7 +222,6 @@ class BasePowerDailyLowSensor(BasePowerSensorBase):
 
     _attr_name = "Daily Low"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:arrow-down-bold"
 
