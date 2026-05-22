@@ -101,7 +101,9 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._client_token,
                     )
                     self._session_id = result["session_id"]
-                    self._client_token = result["client_token"]
+                    # Keep original client_token from step 1 for __client cookie
+                    # The Authorization header from attempt_first_factor may be
+                    # a session JWT, not a client JWT
                     user_data = result.get("user_data", {})
 
                     # Try to auto-discover service location
