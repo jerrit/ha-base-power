@@ -150,6 +150,8 @@ class BasePowerApiClient:
         if not data:
             return result
 
+        _LOGGER.debug("DashboardRoot raw hex: %s", data.hex())
+
         offset = 0
         while offset < len(data):
             tag = data[offset]
@@ -166,20 +168,29 @@ class BasePowerApiClient:
                 # Status sub-message
                 msg_len, offset = _decode_varint(data, offset)
                 end = offset + msg_len
+                sub_fields: dict[int, int] = {}
                 while offset < end:
                     inner_tag = data[offset]
                     inner_field = inner_tag >> 3
+                    inner_wire = inner_tag & 0x07
                     offset += 1
-                    inner_val, offset = _decode_varint(data, offset)
-                    if inner_field == 1:
-                        result["battery_status"] = inner_val
-                    elif inner_field == 2:
-                        result["battery_count"] = inner_val
-                    elif inner_field == 4:
-                        result["has_solar"] = bool(inner_val)
+                    if inner_wire == 0:
+                        inner_val, offset = _decode_varint(data, offset)
+                        sub_fields[inner_field] = inner_val
+                    else:
+                        offset = _skip_field(data, offset, inner_wire)
+                _LOGGER.debug("DashboardRoot status sub-fields: %s", sub_fields)
+                result["battery_count"] = sub_fields.get(1, 0)
+                result["battery_status"] = sub_fields.get(2, 0)
+                result["has_solar"] = bool(sub_fields.get(4, 0))
             else:
                 offset = _skip_field(data, offset, wire_type)
 
+        # battery_count of 0 means unknown; default to 1
+        if result["battery_count"] == 0:
+            result["battery_count"] = 1
+
+        _LOGGER.debug("DashboardRoot parsed: %s", result)
         return result
 
     @staticmethod
