@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 import logging
 from typing import Any
-from urllib.parse import urlencode
 
 import aiohttp
 
@@ -19,7 +18,6 @@ JWT_LIFETIME = 60
 
 # Headers to pass Clerk's bot protection
 _CLERK_HEADERS = {
-    "Content-Type": "application/x-www-form-urlencoded",
     "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
 }
 
@@ -56,9 +54,9 @@ class BasePowerAuth:
             f"{CLERK_DOMAIN}/v1/client/sessions/"
             f"{self._session_id}/tokens?_clerk_js_version={CLERK_JS_VERSION}"
         )
-        headers = {**_CLERK_HEADERS, "Authorization": self._client_token}
+        cookies = {"__client": self._client_token}
 
-        async with self._session.post(url, headers=headers) as resp:
+        async with self._session.post(url, headers=_CLERK_HEADERS, cookies=cookies) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 _LOGGER.error("Failed to refresh JWT: %s %s", resp.status, text)
@@ -88,7 +86,7 @@ class BasePowerAuth:
             **_CLERK_HEADERS,
             "Authorization": f"Bearer {publishable_key}",
         }
-        data = urlencode({"identifier": email})
+        data = {"identifier": email}
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
@@ -142,13 +140,10 @@ class BasePowerAuth:
             f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/"
             f"prepare_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
         )
-        headers = {
-            **_CLERK_HEADERS,
-            "Authorization": client_token,
-        }
-        data = urlencode({"strategy": "email_code", "email_address_id": email_id})
+        cookies = {"__client": client_token}
+        data = {"strategy": "email_code", "email_address_id": email_id}
 
-        async with session.post(url, headers=headers, data=data) as resp:
+        async with session.post(url, headers=_CLERK_HEADERS, data=data, cookies=cookies) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 _LOGGER.error(
@@ -172,13 +167,10 @@ class BasePowerAuth:
             f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/"
             f"attempt_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
         )
-        headers = {
-            **_CLERK_HEADERS,
-            "Authorization": client_token,
-        }
-        data = urlencode({"strategy": "email_code", "code": code})
+        cookies = {"__client": client_token}
+        data = {"strategy": "email_code", "code": code}
 
-        async with session.post(url, headers=headers, data=data) as resp:
+        async with session.post(url, headers=_CLERK_HEADERS, data=data, cookies=cookies) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise AuthenticationError(f"OTP verification failed: {text}")

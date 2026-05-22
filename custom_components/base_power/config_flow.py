@@ -10,7 +10,6 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_EMAIL
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     DOMAIN,
@@ -46,29 +45,30 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._email = user_input[CONF_EMAIL]
-            session = async_get_clientsession(self.hass)
 
             try:
-                result = await BasePowerAuth.async_initiate_sign_in(
-                    session, self._email, CLERK_PUBLISHABLE_KEY
-                )
-                self._sign_in_id = result["sign_in_id"]
-                self._email_id = result["email_id"]
-                self._client_token = result["client_token"]
-
-                if not self._client_token:
-                    _LOGGER.error("No client token received from Clerk")
-                    errors["base"] = "auth_failed"
-                else:
-                    # Send OTP code
-                    await BasePowerAuth.async_prepare_first_factor(
-                        session,
-                        self._sign_in_id,
-                        self._email_id,
-                        self._client_token,
+                async with aiohttp.ClientSession() as session:
+                    result = await BasePowerAuth.async_initiate_sign_in(
+                        session, self._email, CLERK_PUBLISHABLE_KEY
                     )
-                    return await self.async_step_verify_code()
-            except AuthenticationError:
+                    self._sign_in_id = result["sign_in_id"]
+                    self._email_id = result["email_id"]
+                    self._client_token = result["client_token"]
+
+                    if not self._client_token:
+                        _LOGGER.error("No client token received from Clerk")
+                        errors["base"] = "auth_failed"
+                    else:
+                        # Send OTP code
+                        await BasePowerAuth.async_prepare_first_factor(
+                            session,
+                            self._sign_in_id,
+                            self._email_id,
+                            self._client_token,
+                        )
+                        return await self.async_step_verify_code()
+            except AuthenticationError as err:
+                _LOGGER.error("Authentication error: %s", err)
                 errors["base"] = "auth_failed"
             except Exception:
                 _LOGGER.exception("Unexpected error during sign-in")
@@ -88,15 +88,15 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             code = user_input["code"]
-            session = async_get_clientsession(self.hass)
 
             try:
-                result = await BasePowerAuth.async_attempt_first_factor(
-                    session,
-                    self._sign_in_id,
-                    code,
-                    self._client_token,
-                )
+                async with aiohttp.ClientSession() as session:
+                    result = await BasePowerAuth.async_attempt_first_factor(
+                        session,
+                        self._sign_in_id,
+                        code,
+                        self._client_token,
+                    )
                 self._session_id = result["session_id"]
                 self._client_token = result["client_token"]
 
