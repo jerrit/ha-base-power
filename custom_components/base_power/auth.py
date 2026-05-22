@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import logging
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -81,7 +82,7 @@ class BasePowerAuth:
             "Authorization": f"Bearer {publishable_key}",
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        data = f"identifier={email}"
+        data = urlencode({"identifier": email})
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
@@ -139,7 +140,7 @@ class BasePowerAuth:
             "Authorization": client_token,
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        data = f"strategy=email_code&email_address_id={email_id}"
+        data = urlencode({"strategy": "email_code", "email_address_id": email_id})
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
@@ -169,7 +170,7 @@ class BasePowerAuth:
             "Authorization": client_token,
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        data = f"strategy=email_code&code={code}"
+        data = urlencode({"strategy": "email_code", "code": code})
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
