@@ -182,7 +182,7 @@ class BasePowerApiClient:
                 _LOGGER.debug("DashboardRoot status sub-fields: %s", sub_fields)
                 result["battery_count"] = sub_fields.get(1, 0)
                 result["battery_status"] = sub_fields.get(2, 0)
-                result["has_solar"] = bool(sub_fields.get(4, 0))
+                # Field 4 meaning unknown - not solar. Don't infer has_solar from here.
             else:
                 offset = _skip_field(data, offset, wire_type)
 
