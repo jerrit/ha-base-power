@@ -52,25 +52,44 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Fetch recent usage (15-min kWh readings)
             usage = await self.api.get_recent_usage(self.service_location_id)
 
-            # Fetch grid status (may be empty for new installs)
+            # Fetch grid status (outage, SoC)
             grid = await self.api.get_grid_status(self.service_location_id)
+
+            # Fetch WiFi metrics
+            wifi = await self.api.get_wifi_metrics(self.service_location_id)
+
+            # Fetch energy breakdown
+            energy = await self.api.get_usage_energy(self.service_location_id)
+
+            # Fetch billing metadata
+            billing = await self.api.get_billing_metadata(self.service_location_id)
+
+            # Fetch usage cycles (asset ID)
+            cycles = await self.api.get_usage_cycles(self.service_location_id)
 
             # Derive additional values
             derived = self._derive_values(dashboard, usage)
 
-            # Battery percentage: track max backup_seconds as 100% calibration
-            backup_seconds = dashboard.get("backup_seconds", 0)
-            if backup_seconds > self._max_backup_seconds:
-                self._max_backup_seconds = backup_seconds
-            if self._max_backup_seconds > 0 and backup_seconds > 0:
-                derived["battery_percent"] = round(
-                    min((backup_seconds / self._max_backup_seconds) * 100, 100.0), 1
-                )
+            # Battery percentage: prefer SoC from grid status, fall back to calibration
+            if grid.get("battery_soc_percent") is not None:
+                derived["battery_percent"] = grid["battery_soc_percent"]
+            else:
+                backup_seconds = dashboard.get("backup_seconds", 0)
+                if backup_seconds > self._max_backup_seconds:
+                    self._max_backup_seconds = backup_seconds
+                if self._max_backup_seconds > 0 and backup_seconds > 0:
+                    derived["battery_percent"] = round(
+                        min((backup_seconds / self._max_backup_seconds) * 100, 100.0), 1
+                    )
 
             return {
                 "dashboard": dashboard,
                 "usage": usage,
                 "grid": grid,
+                "wifi": wifi,
+                "energy": energy,
+                "billing": billing,
+                "cycles": cycles,
                 "derived": derived,
             }
         except AuthenticationError as err:

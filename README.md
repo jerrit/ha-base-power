@@ -13,13 +13,18 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 ## Features
 
-- **Battery Level** — Estimated battery percentage (self-calibrating)
+- **Battery Level** — State of charge percentage (from grid status API when available, self-calibrating fallback)
 - **Backup Time** — Hours of backup power remaining
 - **System Capacity** — Auto-detected from API (25 kWh × battery count)
 - **Current Power** — Real-time power consumption (watts)
 - **Energy Monitoring** — 15-minute interval energy data compatible with HA Energy Dashboard
+- **Energy Breakdown** — Grid-to-home, solar-to-home, and battery-to-home energy
 - **Daily Statistics** — Peak, low, and total daily energy consumption
+- **Grid Status** — Binary sensor for grid power availability (outage detection)
+- **Battery Status** — Operating state (Installed, In Service, etc.)
 - **Solar Status** — Whether solar panels are connected
+- **WiFi Diagnostics** — Signal strength and SSID of the battery's WiFi connection
+- **Billing** — Current bill amount and due date
 - **Battery Connectivity** — WiFi connection status
 
 ## Installation
@@ -51,9 +56,10 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Battery Level | Estimated state of charge | % |
+| Battery Level | State of charge | % |
 | Battery Backup Time | Hours of backup remaining | hours |
 | Battery Count | Number of battery units detected | — |
+| Battery Status | Operating state (Installed, In Service, etc.) | — |
 | System Capacity | Total capacity (count × 25 kWh) | kWh |
 | Current Power | Current power draw | W |
 | Current Interval Energy | Energy for current 15-min period | kWh |
@@ -61,17 +67,31 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 | Daily Low | Lowest 15-min interval today | kWh |
 | Daily Total Energy | Cumulative energy today | kWh |
 | Intervals Today | Number of data intervals today | — |
+| Grid to Home Energy | Energy drawn from grid | kWh |
+| Solar to Home Energy | Energy from solar panels | kWh |
+| Battery to Home Energy | Energy discharged from battery | kWh |
 
 ### Binary Sensors
 
 | Entity | Description |
 |--------|-------------|
+| Grid Power | Whether grid power is available (off = outage) |
 | Solar Connected | Whether solar panels are present |
 | Battery Connected | Battery WiFi connectivity status |
 
+### Diagnostic Sensors
+
+| Entity | Description | Unit |
+|--------|-------------|------|
+| WiFi Signal | Battery WiFi signal strength | % |
+| WiFi SSID | Connected WiFi network name | — |
+| Bill Amount | Current billing amount | $ |
+| Bill Due Date | Next bill due date | — |
+| Asset ID | System asset identifier | — |
+
 ## Energy Dashboard
 
-The **Daily Total Energy** sensor uses `state_class: total_increasing` and is compatible with the Home Assistant Energy Dashboard. Add it as a grid consumption sensor.
+The **Daily Total Energy**, **Grid to Home Energy**, **Solar to Home Energy**, and **Battery to Home Energy** sensors use `state_class: total_increasing` and are compatible with the Home Assistant Energy Dashboard.
 
 ## Technical Details
 
@@ -82,6 +102,21 @@ The **Daily Total Energy** sensor uses `state_class: total_increasing` and is co
 - **Battery %**: Self-calibrating — tracks max backup time seen as 100% reference
 
 ## Changelog
+
+### v1.5.0
+- Add grid power outage detection binary sensor
+- Add battery SoC from grid status API (replaces self-calibration when available)
+- Add battery status enum sensor (Installed, In Service, etc.)
+- Add WiFi signal strength and SSID diagnostic sensors
+- Add energy breakdown sensors (grid-to-home, solar-to-home, battery-to-home)
+- Add billing amount and due date diagnostic sensors
+- Add asset ID diagnostic sensor
+- Energy breakdown sensors are compatible with HA Energy Dashboard
+
+### v1.4.0
+- Remove device_class=ENERGY from non-cumulative sensors to fix HA state_class warnings
+- Add debug logging for protobuf field identification
+- Fix battery_count and has_solar field mappings
 
 ### v1.3.0
 - Switch to native mobile API authentication pattern (`_is_native=1`)
@@ -113,10 +148,6 @@ The **Daily Total Energy** sensor uses `state_class: total_increasing` and is co
 
 ### Reauthentication required
 - Clerk sessions can expire. Go to the integration and click **Reconfigure** to re-authenticate.
-
-## A Note on Cost & Billing
-
-I have taken out cost & billing information, however if this is desired from others please put in an issue as a request and I can add it. Happy to receive any other feature enhancement requests as well!
 
 ## Contributing
 

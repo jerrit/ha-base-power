@@ -14,6 +14,7 @@ from homeassistant.const import (
     UnitOfTime,
     PERCENTAGE,
 )
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -42,6 +43,15 @@ async def async_setup_entry(
         BasePowerDailyLowSensor(coordinator, entry),
         BasePowerDailyTotalSensor(coordinator, entry),
         BasePowerIntervalCountSensor(coordinator, entry),
+        BasePowerBatteryStatusSensor(coordinator, entry),
+        BasePowerWifiSignalSensor(coordinator, entry),
+        BasePowerWifiSsidSensor(coordinator, entry),
+        BasePowerGridToHomeSensor(coordinator, entry),
+        BasePowerSolarToHomeSensor(coordinator, entry),
+        BasePowerBatteryToHomeSensor(coordinator, entry),
+        BasePowerBillAmountSensor(coordinator, entry),
+        BasePowerBillDueDateSensor(coordinator, entry),
+        BasePowerAssetIdSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -277,4 +287,204 @@ class BasePowerIntervalCountSensor(BasePowerSensorBase):
         """Return number of intervals."""
         if self.coordinator.data:
             return self.coordinator.data["derived"].get("intervals_today")
+        return None
+
+
+BATTERY_STATUS_MAP = {
+    0: "Unknown",
+    1: "Not Installed",
+    2: "Installed",
+    3: "In Service",
+    4: "Offline",
+}
+
+
+class BasePowerBatteryStatusSensor(BasePowerSensorBase):
+    """Sensor for battery status (enum)."""
+
+    _attr_name = "Battery Status"
+    _attr_icon = "mdi:battery-heart-variant"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_battery_status"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return battery status as string."""
+        if self.coordinator.data:
+            status = self.coordinator.data["dashboard"].get("battery_status", 0)
+            return BATTERY_STATUS_MAP.get(status, f"Unknown ({status})")
+        return None
+
+
+class BasePowerWifiSignalSensor(BasePowerSensorBase):
+    """Sensor for battery WiFi signal strength."""
+
+    _attr_name = "WiFi Signal"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:wifi"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_wifi_signal"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return WiFi signal strength percentage."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("wifi", {}).get("signal")
+        return None
+
+
+class BasePowerWifiSsidSensor(BasePowerSensorBase):
+    """Sensor for battery WiFi SSID."""
+
+    _attr_name = "WiFi SSID"
+    _attr_icon = "mdi:wifi-settings"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_wifi_ssid"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return WiFi SSID."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("wifi", {}).get("ssid")
+        return None
+
+
+class BasePowerGridToHomeSensor(BasePowerSensorBase):
+    """Sensor for grid-to-home energy."""
+
+    _attr_name = "Grid to Home Energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:transmission-tower"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_grid_to_home"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return grid-to-home energy in kWh."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("energy", {}).get("grid_to_home_kwh")
+        return None
+
+
+class BasePowerSolarToHomeSensor(BasePowerSensorBase):
+    """Sensor for solar-to-home energy."""
+
+    _attr_name = "Solar to Home Energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:solar-power-variant"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_solar_to_home"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return solar-to-home energy in kWh."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("energy", {}).get("solar_to_home_kwh")
+        return None
+
+
+class BasePowerBatteryToHomeSensor(BasePowerSensorBase):
+    """Sensor for battery-to-home energy."""
+
+    _attr_name = "Battery to Home Energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:battery-arrow-down"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_battery_to_home"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return battery-to-home energy in kWh."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("energy", {}).get("battery_to_home_kwh")
+        return None
+
+
+class BasePowerBillAmountSensor(BasePowerSensorBase):
+    """Sensor for current bill amount."""
+
+    _attr_name = "Bill Amount"
+    _attr_native_unit_of_measurement = "$"
+    _attr_icon = "mdi:currency-usd"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_bill_amount"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return bill amount in dollars."""
+        if self.coordinator.data:
+            cents = self.coordinator.data.get("billing", {}).get("amount_cents")
+            if cents is not None:
+                return round(cents / 100, 2)
+        return None
+
+
+class BasePowerBillDueDateSensor(BasePowerSensorBase):
+    """Sensor for bill due date."""
+
+    _attr_name = "Bill Due Date"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_bill_due_date"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return bill due date."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("billing", {}).get("due_date")
+        return None
+
+
+class BasePowerAssetIdSensor(BasePowerSensorBase):
+    """Sensor for asset ID (diagnostic)."""
+
+    _attr_name = "Asset ID"
+    _attr_icon = "mdi:identifier"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_asset_id"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return asset ID."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("cycles", {}).get("asset_id")
         return None

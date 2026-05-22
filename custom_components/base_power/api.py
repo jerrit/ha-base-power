@@ -118,12 +118,22 @@ class BasePowerApiClient:
         return self._parse_recent_usage(data)
 
     async def get_grid_status(self, service_location_id: str) -> dict[str, Any]:
-        """Get grid status (battery SoC, power flow - pending telemetry)."""
+        """Get grid status (outage status, battery remaining hours)."""
         payload = _encode_service_location_request(service_location_id)
         data = await self._call("MobileGetGridStatus", payload)
-        if not data:
-            return {"available": False}
-        return {"available": True, "raw": data}
+        return self._parse_grid_status(data)
+
+    async def get_usage_energy(self, service_location_id: str) -> dict[str, Any]:
+        """Get energy breakdown (grid-to-home, solar-to-home kWh)."""
+        payload = _encode_service_location_request(service_location_id)
+        data = await self._call("MobileGetUsageEnergy", payload)
+        return self._parse_usage_energy(data)
+
+    async def get_billing_metadata(self, service_location_id: str) -> dict[str, Any]:
+        """Get billing info (amount, due date)."""
+        payload = _encode_service_location_request(service_location_id)
+        data = await self._call("MobileGetBillingMetadata", payload)
+        return self._parse_billing_metadata(data)
 
     async def get_wifi_metrics(self, service_location_id: str) -> dict[str, Any]:
         """Get battery WiFi connectivity metrics."""
@@ -276,4 +286,144 @@ class BasePowerApiClient:
             else:
                 offset += 1
 
+        return result
+
+    @staticmethod
+    def _parse_grid_status(data: bytes) -> dict[str, Any]:
+        """Parse MobileGetGridStatus response.
+
+        Known fields:
+          Field 1 (varint): outage_status (0=grid_up, 1=outage)
+          Field 2 (varint): battery_remaining_seconds
+          Field 3 (varint): battery_soc_percent (0-100)
+        """
+        result: dict[str, Any] = {
+            "available": False,
+            "grid_is_up": True,
+            "battery_soc_percent": None,
+            "battery_remaining_seconds": 0,
+        }
+        if not data:
+            return result
+
+        result["available"] = True
+        _LOGGER.debug("GridStatus raw hex: %s", data.hex())
+
+        offset = 0
+        fields: dict[int, int] = {}
+        while offset < len(data):
+            if offset >= len(data):
+                break
+            tag = data[offset]
+            field_num = tag >> 3
+            wire_type = tag & 0x07
+            offset += 1
+
+            if wire_type == 0:
+                val, offset = _decode_varint(data, offset)
+                fields[field_num] = val
+            else:
+                offset = _skip_field(data, offset, wire_type)
+
+        _LOGGER.debug("GridStatus fields: %s", fields)
+
+        if 1 in fields:
+            result["grid_is_up"] = fields[1] == 0
+        if 2 in fields:
+            result["battery_remaining_seconds"] = fields[2]
+        if 3 in fields:
+            result["battery_soc_percent"] = fields[3]
+
+        return result
+
+    @staticmethod
+    def _parse_usage_energy(data: bytes) -> dict[str, Any]:
+        """Parse MobileGetUsageEnergy response.
+
+        Expected fields (float32 or varint):
+          Field 1: grid_to_home_kwh
+          Field 2: solar_to_home_kwh
+          Field 3: battery_to_home_kwh
+        """
+        result: dict[str, Any] = {
+            "grid_to_home_kwh": None,
+            "solar_to_home_kwh": None,
+            "battery_to_home_kwh": None,
+        }
+        if not data:
+            return result
+
+        _LOGGER.debug("UsageEnergy raw hex: %s", data.hex())
+
+        offset = 0
+        while offset < len(data):
+            if offset >= len(data):
+                break
+            tag = data[offset]
+            field_num = tag >> 3
+            wire_type = tag & 0x07
+            offset += 1
+
+            if wire_type == 5:  # 32-bit (float)
+                if offset + 4 <= len(data):
+                    val = struct.unpack("<f", data[offset : offset + 4])[0]
+                    if field_num == 1:
+                        result["grid_to_home_kwh"] = round(val, 3)
+                    elif field_num == 2:
+                        result["solar_to_home_kwh"] = round(val, 3)
+                    elif field_num == 3:
+                        result["battery_to_home_kwh"] = round(val, 3)
+                offset += 4
+            elif wire_type == 0:
+                _, offset = _decode_varint(data, offset)
+            else:
+                offset = _skip_field(data, offset, wire_type)
+
+        _LOGGER.debug("UsageEnergy parsed: %s", result)
+        return result
+
+    @staticmethod
+    def _parse_billing_metadata(data: bytes) -> dict[str, Any]:
+        """Parse MobileGetBillingMetadata response.
+
+        Expected fields:
+          Field 1 (sub-message or string): plan_name
+          Field 2 (varint): amount_cents
+          Field 3 (string): due_date (ISO string or similar)
+        """
+        result: dict[str, Any] = {
+            "amount_cents": None,
+            "due_date": None,
+        }
+        if not data:
+            return result
+
+        _LOGGER.debug("BillingMetadata raw hex: %s", data.hex())
+
+        offset = 0
+        while offset < len(data):
+            if offset >= len(data):
+                break
+            tag = data[offset]
+            field_num = tag >> 3
+            wire_type = tag & 0x07
+            offset += 1
+
+            if wire_type == 0:  # varint
+                val, offset = _decode_varint(data, offset)
+                if field_num == 2:
+                    result["amount_cents"] = val
+            elif wire_type == 2:  # length-delimited (string)
+                str_len, offset = _decode_varint(data, offset)
+                str_data = data[offset : offset + str_len]
+                offset += str_len
+                if field_num == 3:
+                    try:
+                        result["due_date"] = str_data.decode("utf-8")
+                    except (UnicodeDecodeError, ValueError):
+                        pass
+            else:
+                offset = _skip_field(data, offset, wire_type)
+
+        _LOGGER.debug("BillingMetadata parsed: %s", result)
         return result

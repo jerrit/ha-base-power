@@ -26,6 +26,7 @@ async def async_setup_entry(
     entities = [
         BasePowerSolarSensor(coordinator, entry),
         BasePowerBatteryConnectedSensor(coordinator, entry),
+        BasePowerGridStatusSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -92,4 +93,24 @@ class BasePowerBatteryConnectedSensor(BasePowerBinarySensorBase):
         if self.coordinator.data:
             # If we have dashboard data with backup_seconds > 0, battery is connected
             return self.coordinator.data["dashboard"].get("backup_seconds", 0) > 0
+        return None
+
+
+class BasePowerGridStatusSensor(BasePowerBinarySensorBase):
+    """Binary sensor for grid power status (on = grid up, off = outage)."""
+
+    _attr_name = "Grid Power"
+    _attr_device_class = BinarySensorDeviceClass.POWER
+    _attr_icon = "mdi:transmission-tower"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_grid_power"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if grid power is available (no outage)."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("grid", {}).get("grid_is_up", True)
         return None
