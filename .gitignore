@@ -3,7 +3,9 @@ BASE_POWER_API.md
 HACS_INTEGRATION.md
 test_grid_status.ps1
 base-power.xapk
+base-power.zip
 extracted/
+xapk_extracted/
 tools/
 
 # Python
