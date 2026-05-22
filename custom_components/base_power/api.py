@@ -76,7 +76,6 @@ class BasePowerApiClient:
         """Initialize the API client."""
         self._session = session
         self._jwt: str | None = None
-        self.raw_responses: dict[str, str] = {}  # method -> hex string
 
     def set_jwt(self, jwt: str) -> None:
         """Set the current JWT for API calls."""
@@ -103,10 +102,8 @@ class BasePowerApiClient:
                     grpc_status,
                     grpc_message,
                 )
-                self.raw_responses[method] = ""
                 return b""
             data = _parse_grpc_frame(response_data)
-            self.raw_responses[method] = data.hex() if data else ""
             return data
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:

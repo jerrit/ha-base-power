@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -82,29 +81,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cycles = await self.api.get_usage_cycles(self.service_location_id)
             except Exception as err:
                 _LOGGER.debug("UsageCycles fetch failed: %s", err)
-
-            # Write debug dump of raw API responses
-            try:
-                dump_path = self.hass.config.path("base_power_debug.json")
-                dump = {
-                    "timestamp": datetime.now().isoformat(),
-                    "raw_hex": self.api.raw_responses,
-                    "parsed": {
-                        "dashboard": dashboard,
-                        "grid": grid,
-                        "wifi": wifi,
-                        "energy": energy,
-                        "billing": billing,
-                        "cycles": cycles,
-                        "usage_count": len(usage),
-                        "last_usage": usage[-1] if usage else None,
-                    },
-                }
-                with open(dump_path, "w") as f:
-                    json.dump(dump, f, indent=2, default=str)
-                _LOGGER.warning("Base Power debug dump written to %s", dump_path)
-            except Exception as dump_err:
-                _LOGGER.error("Failed to write debug dump: %s", dump_err)
 
             # Derive additional values
             derived = self._derive_values(dashboard, usage)
