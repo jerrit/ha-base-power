@@ -1,12 +1,12 @@
 {
   "domain": "base_power",
   "name": "Base Power",
-  "codeowners": [],
+  "codeowners": ["@jerrit"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/your-username/base_power_hacs",
+  "documentation": "https://github.com/jerrit/ha-base-power",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/your-username/base_power_hacs/issues",
+  "issue_tracker": "https://github.com/jerrit/ha-base-power/issues",
   "requirements": ["aiohttp>=3.8.0"],
-  "version": "1.6.0"
+  "version": "1.7.0"
 }
