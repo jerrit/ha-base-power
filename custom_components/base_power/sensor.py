@@ -98,8 +98,11 @@ class BasePowerBackupHoursSensor(BasePowerSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        """Return backup hours remaining."""
+        """Return estimated backup hours remaining."""
         if self.coordinator.data:
+            estimated = self.coordinator.data.get("derived", {}).get("estimated_backup_hours")
+            if estimated is not None:
+                return estimated
             return self.coordinator.data["dashboard"].get("backup_hours")
         return None
 

@@ -97,6 +97,25 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         min((backup_seconds / self._max_backup_seconds) * 100, 100.0), 1
                     )
 
+            # Estimated backup hours: (SoC% × capacity_kWh) ÷ avg_home_power_kW
+            # avg_home_power_kW = daily_total_kwh / (intervals_today / 4)
+            battery_percent = derived.get("battery_percent")
+            intervals = derived.get("intervals_today", 0)
+            daily_total = derived.get("daily_total_kwh", 0.0)
+            capacity_kwh = derived.get("capacity_kwh", 0.0)
+            if (
+                battery_percent is not None
+                and battery_percent > 0
+                and intervals > 0
+                and daily_total > 0
+                and capacity_kwh > 0
+            ):
+                avg_power_kw = daily_total / (intervals / 4)
+                battery_energy_kwh = battery_percent / 100 * capacity_kwh
+                derived["estimated_backup_hours"] = round(battery_energy_kwh / avg_power_kw, 1)
+            else:
+                derived["estimated_backup_hours"] = None
+
             return {
                 "dashboard": dashboard,
                 "usage": usage,
