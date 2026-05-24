@@ -55,6 +55,7 @@ async def async_setup_entry(
         BasePowerAssetIdSensor(coordinator, entry),
         BasePowerGridPowerAmpsSensor(coordinator, entry),
         BasePowerDailyTotalGridSensor(coordinator, entry),
+        BasePowerDailyAvgGridSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -534,4 +535,26 @@ class BasePowerDailyTotalGridSensor(BasePowerSensorBase):
         """Return daily total kWh from grid status."""
         if self.coordinator.data:
             return self.coordinator.data.get("grid", {}).get("daily_total_kwh_grid")
+        return None
+
+
+class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
+    """Sensor for daily average 15-min interval energy from grid."""
+
+    _attr_name = "Daily Average Grid Interval"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chart-bell-curve"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_daily_avg_grid"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return daily average 15-min interval kWh from grid."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("grid", {}).get("daily_avg_kwh_grid")
         return None
