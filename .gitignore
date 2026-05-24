@@ -7,9 +7,7 @@ base-power.zip
 extracted/
 xapk_extracted/
 tools/
-test_api.py
-test_auth.py
-test_discover.py
+test_*.py
 decode_proto.py
 probe_api.py
 
