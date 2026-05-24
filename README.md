@@ -13,15 +13,20 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 ## Features
 
-- **Battery Level** — State of charge percentage (from grid status API when available, self-calibrating fallback)
-- **Backup Time** — Hours of backup power remaining
+- **Battery Level** — Real SoC% from the GridStatus API (15-min resolution)
+- **Backup Time** — Dynamic estimate: `(SoC% × capacity kWh) ÷ avg home power kW`
 - **System Capacity** — Auto-detected from API (25 kWh × battery count)
 - **Current Power** — Real-time power consumption (watts)
+- **Grid Power** — Current draw in amps from the latest 15-min grid reading
 - **Energy Monitoring** — 15-minute interval energy data compatible with HA Energy Dashboard
 - **Energy Breakdown** — Grid-to-home, solar-to-home, and battery-to-home energy
-- **Daily Statistics** — Peak, low, and total daily energy consumption
+- **Total Home Energy** — Combined consumption from all sources (grid + solar + battery)
+- **Self-Sufficiency** — % of home energy supplied by solar + battery vs grid
+- **Daily Statistics** — Peak, low, total, and average interval energy
+- **Daily Total (Grid)** — Total kWh from the grid status summary
 - **Grid Status** — Binary sensor for grid power availability (outage detection)
 - **Battery Status** — Operating state (Installed, In Service, etc.)
+- **Battery Charging** — Whether the battery is currently charging or discharging
 - **Solar Status** — Whether solar panels are connected
 - **WiFi Diagnostics** — Signal strength and SSID of the battery's WiFi connection
 - **Billing** — Current bill amount and due date
@@ -48,7 +53,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 2. Search for "Base Power"
 3. Enter your Base Power account email
 4. Check your email for a verification code and enter it
-5. Enter your Service Location ID (found in the Base Power app)
+5. Your account is configured automatically — no Service Location ID required
 
 ## Entities
 
@@ -70,6 +75,11 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 | Grid to Home Energy | Energy drawn from grid | kWh |
 | Solar to Home Energy | Energy from solar panels | kWh |
 | Battery to Home Energy | Energy discharged from battery | kWh |
+| Total Home Energy | Combined home consumption (grid + solar + battery) | kWh |
+| Self-Sufficiency | % of home energy from solar + battery | % |
+| Grid Power (amps) | Current grid draw from latest 15-min reading | A |
+| Daily Total (Grid) | Total grid kWh from grid status summary | kWh |
+| Daily Average Grid Interval | Average kWh per 15-min grid interval | kWh |
 
 ### Binary Sensors
 
@@ -78,6 +88,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 | Grid Power | Whether grid power is available (off = outage) |
 | Solar Connected | Whether solar panels are present |
 | Battery Connected | Battery WiFi connectivity status |
+| Battery Charging | Whether battery SoC is currently increasing |
 
 ### Diagnostic Sensors
 
@@ -91,7 +102,14 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 ## Energy Dashboard
 
-The **Daily Total Energy**, **Grid to Home Energy**, **Solar to Home Energy**, and **Battery to Home Energy** sensors use `state_class: total_increasing` and are compatible with the Home Assistant Energy Dashboard.
+The following sensors use `state_class: total_increasing` and are ready to configure in **Settings → Energy**:
+
+| Energy Dashboard slot | Sensor to use |
+|----------------------|---------------|
+| Grid consumption | Grid to Home Energy |
+| Solar panels | Solar to Home Energy |
+| Battery discharge | Battery to Home Energy |
+| Home consumption | Total Home Energy |
 
 ## Technical Details
 
@@ -99,9 +117,27 @@ The **Daily Total Energy**, **Grid to Home Energy**, **Solar to Home Energy**, a
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
 - **Polling Interval**: 5 minutes
 - **Battery**: 25 kWh per unit, auto-detects 1 or 2 battery configurations
-- **Battery %**: Self-calibrating — tracks max backup time seen as 100% reference
+- **Battery %**: Real SoC% from `MobileGetGridStatus` 15-min time series
+- **Backup Time**: Computed as `(SoC% × capacity kWh) ÷ avg home power kW` from today's usage intervals
+- **Service Location ID**: Auto-discovered via `MobileGetAvailableLocations` — not required during setup
 
 ## Changelog
+
+### v1.7.0
+- Auto-discover Service Location ID — setup is now email + OTP only, no manual ID lookup required
+- Add Self-Sufficiency % sensor: `(solar + battery) ÷ total home consumption`
+- Add Total Home Energy sensor: `grid + solar + battery` kWh (Energy Dashboard compatible)
+- Add Battery Charging binary sensor: inferred from SoC delta between polls
+- Add Daily Average Grid Interval sensor (already fetched, now exposed)
+- Fix Solar Connected: falls back to `solar_to_home_kwh > 0` when API field is unset
+- Fix Battery Backup Time: now a dynamic estimate from live SoC and average home load
+- Energy Dashboard: add `suggested_display_precision` to all energy sensors
+
+### v1.6.0
+- Battery Level now shows real SoC% from `MobileGetGridStatus` (replaces self-calibration)
+- Add Grid Power sensor: current draw in amps from the latest 15-min grid reading
+- Add Daily Total (Grid) sensor: total kWh from the grid status summary
+- Add parse support for rich `MobileGetGridStatus` response (battery SoC and power data)
 
 ### v1.5.0
 - Add grid power outage detection binary sensor
