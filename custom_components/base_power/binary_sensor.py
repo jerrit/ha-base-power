@@ -27,6 +27,7 @@ async def async_setup_entry(
         BasePowerSolarSensor(coordinator, entry),
         BasePowerBatteryConnectedSensor(coordinator, entry),
         BasePowerGridStatusSensor(coordinator, entry),
+        BasePowerBatteryChargingSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -75,6 +76,8 @@ class BasePowerSolarSensor(BasePowerBinarySensorBase):
         return None
 
 
+
+
 class BasePowerBatteryConnectedSensor(BasePowerBinarySensorBase):
     """Binary sensor for battery WiFi connectivity."""
 
@@ -113,4 +116,24 @@ class BasePowerGridStatusSensor(BasePowerBinarySensorBase):
         """Return True if grid power is available (no outage)."""
         if self.coordinator.data:
             return self.coordinator.data.get("grid", {}).get("grid_is_up", True)
+        return None
+
+
+class BasePowerBatteryChargingSensor(BasePowerBinarySensorBase):
+    """Binary sensor for battery charging state (on = charging, off = discharging)."""
+
+    _attr_name = "Battery Charging"
+    _attr_device_class = BinarySensorDeviceClass.BATTERY_CHARGING
+    _attr_icon = "mdi:battery-charging"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_battery_charging"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if battery SoC is increasing, False if decreasing, None if stable."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("derived", {}).get("battery_charging")
         return None

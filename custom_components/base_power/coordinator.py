@@ -38,6 +38,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.auth = auth
         self.service_location_id = service_location_id
         self._max_backup_seconds: int = 0  # Track max for % calibration
+        self._prev_soc: float | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Base Power API."""
@@ -98,7 +99,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
 
             # Estimated backup hours: (SoC% × capacity_kWh) ÷ avg_home_power_kW
-            # avg_home_power_kW = daily_total_kwh / (intervals_today / 4)
             battery_percent = derived.get("battery_percent")
             intervals = derived.get("intervals_today", 0)
             daily_total = derived.get("daily_total_kwh", 0.0)
@@ -115,6 +115,36 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 derived["estimated_backup_hours"] = round(battery_energy_kwh / avg_power_kw, 1)
             else:
                 derived["estimated_backup_hours"] = None
+
+            # Battery charging/discharging: infer from SoC delta between polls
+            if battery_percent is not None and self._prev_soc is not None:
+                delta = battery_percent - self._prev_soc
+                if delta > 0.5:
+                    derived["battery_charging"] = True
+                elif delta < -0.5:
+                    derived["battery_charging"] = False
+                else:
+                    derived["battery_charging"] = None
+            else:
+                derived["battery_charging"] = None
+            self._prev_soc = battery_percent
+
+            # Self-sufficiency and total home consumption from energy data
+            grid_kwh = energy.get("grid_to_home_kwh") or 0.0
+            solar_kwh = energy.get("solar_to_home_kwh") or 0.0
+            battery_kwh = energy.get("battery_to_home_kwh") or 0.0
+            total_home = grid_kwh + solar_kwh + battery_kwh
+            derived["total_home_kwh"] = round(total_home, 3) if total_home > 0 else None
+            if total_home > 0:
+                derived["self_sufficiency_percent"] = round(
+                    (solar_kwh + battery_kwh) / total_home * 100, 1
+                )
+            else:
+                derived["self_sufficiency_percent"] = None
+
+            # has_solar: trust API field or fall back to solar production > 0
+            if not dashboard.get("has_solar") and solar_kwh > 0:
+                dashboard["has_solar"] = True
 
             return {
                 "dashboard": dashboard,
