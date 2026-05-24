@@ -18,6 +18,7 @@ from .const import (
     CONF_SESSION_JWT,
     CONF_SERVICE_LOCATION_ID,
 )
+from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,6 +104,32 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._session_id = result["session_id"]
                     self._client_token = result["client_token"]
                     self._session_jwt = result.get("session_jwt")
+
+                    # Auto-discover service location ID
+                    try:
+                        auth = BasePowerAuth(
+                            session,
+                            self._client_token,
+                            self._session_id,
+                            self._session_jwt,
+                        )
+                        jwt = await auth.async_ensure_valid_token()
+                        location_id = await BasePowerApiClient.async_discover_location_id(
+                            session, jwt
+                        )
+                        if location_id:
+                            _LOGGER.info(
+                                "Auto-discovered service location ID: %s", location_id
+                            )
+                            return await self.async_step_location(
+                                {CONF_SERVICE_LOCATION_ID: location_id}
+                            )
+                    except Exception:
+                        _LOGGER.warning(
+                            "Location auto-discovery failed, falling back to manual entry",
+                            exc_info=True,
+                        )
+
                     return await self.async_step_location()
             except AuthenticationError:
                 errors["base"] = "invalid_code"
