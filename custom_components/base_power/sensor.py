@@ -56,6 +56,8 @@ async def async_setup_entry(
         BasePowerGridPowerAmpsSensor(coordinator, entry),
         BasePowerDailyTotalGridSensor(coordinator, entry),
         BasePowerDailyAvgGridSensor(coordinator, entry),
+        BasePowerTotalHomeEnergySensor(coordinator, entry),
+        BasePowerSelfSufficiencySensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -375,6 +377,7 @@ class BasePowerGridToHomeSensor(BasePowerSensorBase):
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 2
     _attr_icon = "mdi:transmission-tower"
 
     def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
@@ -397,6 +400,7 @@ class BasePowerSolarToHomeSensor(BasePowerSensorBase):
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 2
     _attr_icon = "mdi:solar-power-variant"
 
     def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
@@ -419,6 +423,7 @@ class BasePowerBatteryToHomeSensor(BasePowerSensorBase):
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 2
     _attr_icon = "mdi:battery-arrow-down"
 
     def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
@@ -560,4 +565,49 @@ class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
         """Return daily average 15-min interval kWh from grid."""
         if self.coordinator.data:
             return self.coordinator.data.get("grid", {}).get("daily_avg_kwh_grid")
+        return None
+
+
+class BasePowerTotalHomeEnergySensor(BasePowerSensorBase):
+    """Sensor for total home energy consumption (grid + solar + battery)."""
+
+    _attr_name = "Total Home Energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 2
+    _attr_icon = "mdi:home-lightning-bolt"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_total_home_energy"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return total home energy consumption in kWh."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("derived", {}).get("total_home_kwh")
+        return None
+
+
+class BasePowerSelfSufficiencySensor(BasePowerSensorBase):
+    """Sensor for energy self-sufficiency percentage."""
+
+    _attr_name = "Self-Sufficiency"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:leaf"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_self_sufficiency"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return % of home energy from solar + battery (vs grid)."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("derived", {}).get("self_sufficiency_percent")
         return None
