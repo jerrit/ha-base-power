@@ -171,6 +171,50 @@ def _parse_grid_summary(sub: bytes, result: dict[str, Any]) -> None:
             break
 
 
+def _parse_first_location_id(data: bytes) -> str | None:
+    """Parse MobileGetAvailableLocations response to extract the first location ID.
+
+    Response: field 1 = sub-message { field 1 = location_id (string) }
+    """
+    offset = 0
+    while offset < len(data):
+        tag_val, new_offset = _decode_varint(data, offset)
+        if new_offset == offset:
+            break
+        offset = new_offset
+        field_num = tag_val >> 3
+        wire_type = tag_val & 0x07
+        if wire_type == 2:
+            length, offset = _decode_varint(data, offset)
+            sub = data[offset : offset + length]
+            offset += length
+            if field_num == 1:
+                # First location sub-message — extract field 1 (location ID string)
+                sub_offset = 0
+                while sub_offset < len(sub):
+                    sub_tag, new_sub = _decode_varint(sub, sub_offset)
+                    if new_sub == sub_offset:
+                        break
+                    sub_offset = new_sub
+                    sub_field = sub_tag >> 3
+                    sub_wire = sub_tag & 0x07
+                    if sub_wire == 2:
+                        sub_len, sub_offset = _decode_varint(sub, sub_offset)
+                        value = sub[sub_offset : sub_offset + sub_len]
+                        sub_offset += sub_len
+                        if sub_field == 1:
+                            try:
+                                return value.decode("utf-8")
+                            except Exception:
+                                return None
+                    else:
+                        sub_offset = _skip_field(sub, sub_offset, sub_wire)
+                return None
+        else:
+            offset = _skip_field(data, offset, wire_type)
+    return None
+
+
 class BasePowerApiClient:
     """Client for the Base Power gRPC-Web API."""
 
@@ -182,6 +226,34 @@ class BasePowerApiClient:
     def set_jwt(self, jwt: str) -> None:
         """Set the current JWT for API calls."""
         self._jwt = jwt
+
+    @staticmethod
+    async def async_discover_location_id(
+        session: aiohttp.ClientSession, jwt: str
+    ) -> str | None:
+        """Call MobileGetAvailableLocations to auto-discover service location ID."""
+        url = f"{API_HOST}/{API_SERVICE}/MobileGetAvailableLocations"
+        headers = {
+            "Content-Type": API_CONTENT_TYPE,
+            "authorization": jwt,
+            "x-grpc-web": "1",
+        }
+        try:
+            async with session.post(
+                url, headers=headers, data=_build_grpc_frame(b"")
+            ) as resp:
+                grpc_status = resp.headers.get("grpc-status", "")
+                if grpc_status and grpc_status != "0":
+                    _LOGGER.debug(
+                        "MobileGetAvailableLocations grpc-status=%s", grpc_status
+                    )
+                    return None
+                raw = await resp.read()
+                data = _parse_grpc_frame(raw)
+                return _parse_first_location_id(data)
+        except Exception:
+            _LOGGER.debug("Location discovery request failed", exc_info=True)
+            return None
 
     async def _call(self, method: str, payload: bytes = b"") -> bytes:
         """Make a gRPC-Web API call."""
