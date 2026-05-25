@@ -355,7 +355,7 @@ class BasePowerApiClient:
                 result["backup_seconds"] = val
                 result["backup_hours"] = round(val / 3600, 2)
             elif field_num == 3 and wire_type == 2:
-                # Status sub-message — may appear once per battery stack
+                # Status sub-message — may appear once per battery unit
                 field3_count += 1
                 msg_len, offset = _decode_varint(data, offset)
                 end = offset + msg_len
@@ -395,8 +395,8 @@ class BasePowerApiClient:
 
         # Derive battery_count:
         # Theory A: sub-field 1 of the first field-3 sub-message is the unit count
-        # Theory B: field-3 repeats once per battery stack
-        # Use whichever is larger; both give 1 for a single-stack user.
+        # Theory B: field-3 repeats once per battery unit
+        # Use whichever is larger; both give 1 for a 1-unit system.
         count_from_subfield = first_sub_fields.get(1, 0)
         result["battery_count"] = max(field3_count, count_from_subfield)
         _LOGGER.debug(

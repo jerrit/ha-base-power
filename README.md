@@ -124,7 +124,7 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 ## Changelog
 
 ### v1.8.0
-- Fix battery count detection for dual-stack (50 kWh) systems — parser now counts repeated Field 3 sub-messages (one per battery unit) in addition to reading sub-field 1, so two-battery installs correctly report capacity and backup time
+- Fix battery count detection for 2-unit (50 kWh) systems — parser now counts repeated Field 3 sub-messages (one per battery unit) in addition to reading sub-field 1, so two-battery installs correctly report capacity and backup time
 - Expanded protobuf debug logging: all unknown top-level fields are now logged with field number and value to aid future API reverse-engineering
 
 ### v1.7.0
