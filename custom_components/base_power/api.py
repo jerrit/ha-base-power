@@ -338,11 +338,16 @@ class BasePowerApiClient:
         _LOGGER.debug("DashboardRoot raw hex: %s", data.hex())
 
         offset = 0
+        field3_count = 0
+        first_sub_fields: dict[int, int] = {}
+
         while offset < len(data):
-            tag = data[offset]
-            field_num = tag >> 3
-            wire_type = tag & 0x07
-            offset += 1
+            tag_val, new_offset = _decode_varint(data, offset)
+            if new_offset == offset:
+                break
+            offset = new_offset
+            field_num = tag_val >> 3
+            wire_type = tag_val & 0x07
 
             if field_num == 7 and wire_type == 0:
                 # Backup seconds remaining (varint)
@@ -350,28 +355,55 @@ class BasePowerApiClient:
                 result["backup_seconds"] = val
                 result["backup_hours"] = round(val / 3600, 2)
             elif field_num == 3 and wire_type == 2:
-                # Status sub-message
+                # Status sub-message — may appear once per battery stack
+                field3_count += 1
                 msg_len, offset = _decode_varint(data, offset)
                 end = offset + msg_len
                 sub_fields: dict[int, int] = {}
                 while offset < end:
-                    inner_tag = data[offset]
-                    inner_field = inner_tag >> 3
-                    inner_wire = inner_tag & 0x07
-                    offset += 1
+                    inner_tag_val, inner_new_offset = _decode_varint(data, offset)
+                    if inner_new_offset == offset:
+                        break
+                    offset = inner_new_offset
+                    inner_field = inner_tag_val >> 3
+                    inner_wire = inner_tag_val & 0x07
                     if inner_wire == 0:
                         inner_val, offset = _decode_varint(data, offset)
                         sub_fields[inner_field] = inner_val
                     else:
                         offset = _skip_field(data, offset, inner_wire)
-                _LOGGER.debug("DashboardRoot status sub-fields: %s", sub_fields)
-                result["battery_count"] = sub_fields.get(1, 0)
-                result["battery_status"] = sub_fields.get(2, 0)
-                # Field 4 meaning unknown - not solar. Don't infer has_solar from here.
+                _LOGGER.debug(
+                    "DashboardRoot field3[%d] sub-fields: %s", field3_count, sub_fields
+                )
+                if field3_count == 1:
+                    first_sub_fields = sub_fields
+                    result["battery_status"] = sub_fields.get(2, 0)
+            elif wire_type == 2:
+                length, offset = _decode_varint(data, offset)
+                _LOGGER.debug(
+                    "DashboardRoot unknown field %d (len-delimited, %d bytes) at offset %d",
+                    field_num, length, offset,
+                )
+                offset += length
+            elif wire_type == 0:
+                val, offset = _decode_varint(data, offset)
+                _LOGGER.debug(
+                    "DashboardRoot unknown field %d (varint=%d)", field_num, val
+                )
             else:
                 offset = _skip_field(data, offset, wire_type)
 
-        # battery_count of 0 means unknown; default to 1
+        # Derive battery_count:
+        # Theory A: sub-field 1 of the first field-3 sub-message is the unit count
+        # Theory B: field-3 repeats once per battery stack
+        # Use whichever is larger; both give 1 for a single-stack user.
+        count_from_subfield = first_sub_fields.get(1, 0)
+        result["battery_count"] = max(field3_count, count_from_subfield)
+        _LOGGER.debug(
+            "DashboardRoot battery_count: field3_count=%d subfield1=%d → %d",
+            field3_count, count_from_subfield, result["battery_count"],
+        )
+
         if result["battery_count"] == 0:
             result["battery_count"] = 1
 
