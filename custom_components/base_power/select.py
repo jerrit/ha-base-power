@@ -5,7 +5,6 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -31,7 +30,7 @@ class BasePowerWifiSsidSelect(CoordinatorEntity[BasePowerCoordinator], SelectEnt
     _attr_has_entity_name = True
     _attr_name = "WiFi Network"
     _attr_icon = "mdi:wifi-settings"
-    _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_registry_enabled_default = True
 
     def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
         """Initialize."""
