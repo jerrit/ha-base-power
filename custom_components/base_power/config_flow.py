@@ -10,6 +10,11 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_EMAIL
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     DOMAIN,
@@ -40,23 +45,42 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
 
         current_ssid = self.config_entry.options.get(CONF_WIFI_SSID, "")
         current_count = self.config_entry.options.get(CONF_BATTERY_COUNT, 1)
+
+        # Pull live WiFi scan from the running coordinator (no extra API call needed)
+        scan: dict[str, int | None] = {}
+        try:
+            coordinator = self.hass.data[DOMAIN][self.config_entry.entry_id]
+            if coordinator.data:
+                scan = coordinator.data.get("wifi", {}).get("scan", {})
+        except (KeyError, AttributeError):
+            pass
+
+        if scan:
+            options: list[dict[str, str]] = [{"value": "", "label": "Auto (strongest signal)"}]
+            seen: set[str] = set()
+            for ssid, signal in sorted(scan.items(), key=lambda x: x[1] or 0, reverse=True):
+                label = f"{ssid} ({signal}%)" if signal is not None else ssid
+                options.append({"value": ssid, "label": label})
+                seen.add(ssid)
+            if current_ssid and current_ssid not in seen:
+                options.append({"value": current_ssid, "label": f"{current_ssid} (not currently visible)"})
+
+            ssid_field = SelectSelector(
+                SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
+            )
+        else:
+            ssid_field = str  # type: ignore[assignment]
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(CONF_WIFI_SSID, default=current_ssid): str,
+                    vol.Optional(CONF_WIFI_SSID, default=current_ssid): ssid_field,
                     vol.Optional(CONF_BATTERY_COUNT, default=current_count): vol.All(
                         vol.Coerce(int), vol.Range(min=1, max=10)
                     ),
                 }
             ),
-            description_placeholders={
-                "hints": (
-                    "WiFi SSID: exact SSID your battery is connected to (e.g. USGOV). "
-                    "Leave blank to use strongest visible network.\n"
-                    "Battery Units: number of battery units installed (1 = 25 kWh, 2 = 50 kWh)."
-                )
-            },
         )
 
 

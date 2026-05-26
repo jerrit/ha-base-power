@@ -31,5 +31,20 @@
     "abort": {
       "already_configured": "This service location is already configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Base Power Options",
+        "data": {
+          "wifi_ssid": "Battery WiFi Network",
+          "battery_count_override": "Number of Battery Units"
+        },
+        "data_description": {
+          "wifi_ssid": "Select the WiFi network your battery is connected to. Signal strength is shown in parentheses.",
+          "battery_count_override": "Number of battery units installed (1 unit = 25 kWh capacity)."
+        }
+      }
+    }
   }
 }
