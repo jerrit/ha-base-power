@@ -1,16 +1,17 @@
 """
-Probe MobileGetDashboardRoot and dump the full protobuf structure.
+Probe Base Power API endpoints and dump full protobuf structures.
 
 Usage:
   python3 test_battery_count.py <email>
 
-The script will authenticate, call MobileGetDashboardRoot, and print:
-  - Full hex dump of the response
-  - Every top-level protobuf field (number, wire type, value/length)
-  - Every sub-field inside field-3 sub-messages
-  - The derived battery_count using both theories
+Probes:
+  - MobileGetAvailableLocations  (may contain unit count in location record)
+  - MobileGetDashboardRoot       (with discovered service_location_id)
+  - MobileGetGridStatus          (may have per-unit data)
+  - MobileGetUsageCycles         (asset_id may encode unit info)
 
-Run this with the 2-stack user's email to identify the correct field.
+Each response is fully dumped — all fields recursively — so we can spot
+where the battery unit count lives without guessing.
 """
 import asyncio
 import struct
@@ -60,11 +61,10 @@ def skip_field(data: bytes, offset: int, wire_type: int) -> int:
     return offset
 
 
-def dump_protobuf(data: bytes, indent: int = 0) -> None:
+def dump_protobuf(data: bytes, indent: int = 0, max_depth: int = 6) -> None:
+    """Fully recursive protobuf dump — every field, every level."""
     prefix = "  " * indent
     offset = 0
-    field3_count = 0
-    first_sub_fields: dict[int, int] = {}
 
     while offset < len(data):
         tag_val, new_offset = decode_varint(data, offset)
@@ -77,73 +77,107 @@ def dump_protobuf(data: bytes, indent: int = 0) -> None:
         if wire_type == 0:
             val, offset = decode_varint(data, offset)
             print(f"{prefix}Field {field_num} (varint) = {val}")
+
         elif wire_type == 2:
             length, offset = decode_varint(data, offset)
             sub = data[offset : offset + length]
             offset += length
-            print(f"{prefix}Field {field_num} (len={length}) = {sub.hex()}")
-            if field_num == 3:
-                field3_count += 1
-                print(f"{prefix}  [field3 #{field3_count} sub-fields]")
-                sub_offset = 0
-                sub_fields: dict[int, int] = {}
-                while sub_offset < len(sub):
-                    stag, snew = decode_varint(sub, sub_offset)
-                    if snew == sub_offset:
-                        break
-                    sub_offset = snew
-                    sf_num = stag >> 3
-                    sf_wire = stag & 0x07
-                    if sf_wire == 0:
-                        sv, sub_offset = decode_varint(sub, sub_offset)
-                        sub_fields[sf_num] = sv
-                        print(f"{prefix}    sub-field {sf_num} (varint) = {sv}")
-                    elif sf_wire == 5:
-                        if sub_offset + 4 <= len(sub):
-                            fv = struct.unpack("<f", sub[sub_offset : sub_offset + 4])[0]
-                            print(f"{prefix}    sub-field {sf_num} (float32) = {fv}")
-                        sub_offset += 4
-                    elif sf_wire == 2:
-                        slen, sub_offset = decode_varint(sub, sub_offset)
-                        sv_bytes = sub[sub_offset : sub_offset + slen]
-                        try:
-                            sv_str = sv_bytes.decode("utf-8")
-                            print(f"{prefix}    sub-field {sf_num} (string) = {sv_str!r}")
-                        except Exception:
-                            print(f"{prefix}    sub-field {sf_num} (bytes) = {sv_bytes.hex()}")
-                        sub_offset += slen
-                    else:
-                        print(f"{prefix}    sub-field {sf_num} (wire={sf_wire}) skipped")
-                        sub_offset = skip_field(sub, sub_offset, sf_wire)
-                if field3_count == 1:
-                    first_sub_fields = sub_fields
+
+            # Try to decode as UTF-8 string first
+            str_val = None
+            if length > 0 and length < 200:
+                try:
+                    candidate = sub.decode("utf-8")
+                    if all(c.isprintable() or c in "\n\r\t" for c in candidate):
+                        str_val = candidate
+                except Exception:
+                    pass
+
+            if str_val is not None:
+                print(f"{prefix}Field {field_num} (string, len={length}) = {str_val!r}")
+            else:
+                print(f"{prefix}Field {field_num} (bytes, len={length}) hex={sub.hex()}")
+                if indent < max_depth and length > 0:
+                    dump_protobuf(sub, indent + 1, max_depth)
+
         elif wire_type == 5:
             if offset + 4 <= len(data):
                 fv = struct.unpack("<f", data[offset : offset + 4])[0]
                 print(f"{prefix}Field {field_num} (float32) = {fv}")
             offset += 4
+
         elif wire_type == 1:
             if offset + 8 <= len(data):
                 dv = struct.unpack("<d", data[offset : offset + 8])[0]
                 print(f"{prefix}Field {field_num} (double) = {dv}")
             offset += 8
+
         else:
             print(f"{prefix}Field {field_num} (wire={wire_type}) unknown, stopping")
             break
 
-    count_subfield = first_sub_fields.get(1, 0)
-    battery_count = max(field3_count, count_subfield)
-    if battery_count == 0:
-        battery_count = 1
 
-    print(f"\n--- Battery count derivation ---")
-    print(f"  field3 occurrences : {field3_count}")
-    print(f"  subfield-1 value   : {count_subfield}")
-    print(f"  → battery_count    : {battery_count} ({battery_count * 25} kWh)")
+def build_grpc_frame(payload: bytes = b"") -> bytes:
+    return b"\x00" + struct.pack(">I", len(payload)) + payload
+
+
+def parse_grpc_frame(raw: bytes) -> bytes:
+    if len(raw) < 5:
+        return b""
+    flag = raw[0]
+    if flag == 0x80:
+        return b""
+    length = struct.unpack(">I", raw[1:5])[0]
+    return raw[5 : 5 + length]
+
+
+def encode_string_field(field_num: int, value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    tag = (field_num << 3) | 2
+    return bytes([tag, len(encoded)]) + encoded
+
+
+async def call_endpoint(
+    session: aiohttp.ClientSession, jwt: str, method: str, payload: bytes = b""
+) -> bytes | None:
+    url = f"{API_HOST}/{API_SERVICE}/{method}"
+    headers = {
+        "Content-Type": "application/grpc-web+proto",
+        "authorization": jwt,
+        "x-grpc-web": "1",
+    }
+    try:
+        async with session.post(url, headers=headers, data=build_grpc_frame(payload)) as resp:
+            raw = await resp.read()
+            grpc_status = resp.headers.get("grpc-status", "0")
+            if grpc_status and grpc_status != "0":
+                print(f"  gRPC error: status={grpc_status} message={resp.headers.get('grpc-message','')}")
+                return None
+            return parse_grpc_frame(raw)
+    except Exception as e:
+        print(f"  Request failed: {e}")
+        return None
+
+
+async def probe_endpoint(
+    session: aiohttp.ClientSession, jwt: str, method: str, payload: bytes = b""
+) -> bytes | None:
+    print(f"\n{'='*60}")
+    print(f"Probing: {method}")
+    print(f"{'='*60}")
+    data = await call_endpoint(session, jwt, method, payload)
+    if data is None or len(data) == 0:
+        print("  (no data / error)")
+        return None
+    print(f"Raw hex ({len(data)} bytes): {data.hex()}\n")
+    print("Protobuf structure:")
+    dump_protobuf(data)
+    return data
 
 
 async def auth_and_fetch(email: str) -> None:
     async with aiohttp.ClientSession() as session:
+        # --- Authentication ---
         print(f"=== Authenticating {email} ===")
         url = f"{CLERK_DOMAIN}/v1/client/sign_ins?_clerk_js_version={CLERK_JS_VERSION}"
         headers = {**_HEADERS, "Authorization": f"Bearer {PUBLISHABLE_KEY}"}
@@ -204,32 +238,77 @@ async def auth_and_fetch(email: str) -> None:
             jwt = (await jr.json())["jwt"]
         print(f"Got JWT (len={len(jwt)})")
 
-        # Call MobileGetDashboardRoot with empty body (no service_location_id)
-        # to let the API return whatever it has for this account.
-        grpc_headers = {
-            "Content-Type": "application/grpc-web+proto",
-            "authorization": jwt,
-            "x-grpc-web": "1",
-        }
-        api_url = f"{API_HOST}/{API_SERVICE}/MobileGetDashboardRoot"
-        empty_frame = b"\x00" + struct.pack(">I", 0)
-        async with session.post(api_url, headers=grpc_headers, data=empty_frame) as ar:
-            raw = await ar.read()
-            grpc_status = ar.headers.get("grpc-status", "0")
-            print(f"gRPC status: {grpc_status}  response bytes: {len(raw)}")
-            if grpc_status and grpc_status != "0":
-                print(f"gRPC error: {ar.headers.get('grpc-message', '')}")
-                return
+        # --- Probe MobileGetAvailableLocations (no payload) ---
+        loc_data = await probe_endpoint(session, jwt, "MobileGetAvailableLocations")
 
-        if len(raw) <= 5:
-            print("Empty response — try passing a service_location_id")
-            return
+        # Extract location ID from response
+        location_id = None
+        if loc_data:
+            # Parse field 1 → sub field 1 (string = location_id)
+            off = 0
+            while off < len(loc_data):
+                tv, noff = decode_varint(loc_data, off)
+                if noff == off:
+                    break
+                off = noff
+                fn = tv >> 3
+                wt = tv & 0x07
+                if wt == 2:
+                    ln, off = decode_varint(loc_data, off)
+                    sub = loc_data[off : off + ln]
+                    off += ln
+                    if fn == 1:
+                        # First string field inside is the location ID
+                        soff = 0
+                        while soff < len(sub):
+                            stv, snoff = decode_varint(sub, soff)
+                            if snoff == soff:
+                                break
+                            soff = snoff
+                            sfn = stv >> 3
+                            swt = stv & 0x07
+                            if swt == 2:
+                                sln, soff = decode_varint(sub, soff)
+                                val = sub[soff : soff + sln]
+                                soff += sln
+                                if sfn == 1:
+                                    try:
+                                        location_id = val.decode("utf-8")
+                                    except Exception:
+                                        pass
+                                    break
+                            else:
+                                soff = skip_field(sub, soff, swt)
+                        if location_id:
+                            break
+                else:
+                    off = skip_field(loc_data, off, wt)
 
-        # Strip gRPC-Web frame header (1 flag byte + 4 length bytes)
-        payload = raw[5 : 5 + struct.unpack(">I", raw[1:5])[0]]
-        print(f"\nFull hex: {payload.hex()}\n")
-        print("=== Protobuf structure ===")
-        dump_protobuf(payload)
+        if location_id:
+            print(f"\n>>> Discovered location_id: {location_id}")
+            loc_payload = encode_string_field(1, location_id)
+        else:
+            print("\n>>> Could not discover location_id — using empty payload")
+            loc_payload = b""
+
+        # --- Probe DashboardRoot with location_id ---
+        await probe_endpoint(session, jwt, "MobileGetDashboardRoot", loc_payload)
+
+        # --- Probe GridStatus ---
+        await probe_endpoint(session, jwt, "MobileGetGridStatus", loc_payload)
+
+        # --- Probe UsageCycles (has asset_id) ---
+        await probe_endpoint(session, jwt, "MobileGetUsageCycles", loc_payload)
+
+        # --- Try endpoints that might expose equipment/inventory ---
+        for method in [
+            "MobileGetSystemInfo",
+            "MobileGetBatteryConfig",
+            "MobileGetDevices",
+            "MobileGetEquipment",
+            "MobileGetInstallation",
+        ]:
+            await probe_endpoint(session, jwt, method, loc_payload)
 
 
 if __name__ == "__main__":
