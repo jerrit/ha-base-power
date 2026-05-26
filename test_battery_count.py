@@ -294,19 +294,55 @@ async def auth_and_fetch(email: str) -> None:
         # --- Probe DashboardRoot with location_id ---
         await probe_endpoint(session, jwt, "MobileGetDashboardRoot", loc_payload)
 
+        # --- Probe WifiMetrics (primary WiFi source — currently bouncy) ---
+        print("\n" + "="*60)
+        print("Probing: MobileGetWifiMetrics  *** WiFi focus ***")
+        print("="*60)
+        wifi_data = await call_endpoint(session, jwt, "MobileGetWifiMetrics", loc_payload)
+        if wifi_data:
+            print(f"Raw hex ({len(wifi_data)} bytes): {wifi_data.hex()}\n")
+            print("Protobuf structure:")
+            dump_protobuf(wifi_data)
+            # Count top-level repeated field-1 entries so we know how many networks
+            off = 0
+            field_counts: dict[int, int] = {}
+            while off < len(wifi_data):
+                tv, noff = decode_varint(wifi_data, off)
+                if noff == off:
+                    break
+                off = noff
+                fn = tv >> 3
+                wt = tv & 0x07
+                field_counts[fn] = field_counts.get(fn, 0) + 1
+                if wt == 2:
+                    ln, off = decode_varint(wifi_data, off)
+                    off += ln
+                elif wt == 0:
+                    _, off = decode_varint(wifi_data, off)
+                else:
+                    off = skip_field(wifi_data, off, wt)
+            print(f"\n>>> Top-level field occurrence counts: {field_counts}")
+            print(">>> If field 1 count > 1, those are scan results.")
+            print(">>> If field 2 exists, that is the connected-network entry.")
+        else:
+            print("  (no data / error)")
+
         # --- Probe GridStatus ---
         await probe_endpoint(session, jwt, "MobileGetGridStatus", loc_payload)
 
         # --- Probe UsageCycles (has asset_id) ---
         await probe_endpoint(session, jwt, "MobileGetUsageCycles", loc_payload)
 
-        # --- Try endpoints that might expose equipment/inventory ---
+        # --- Try endpoints that might expose equipment/inventory or stable WiFi ---
         for method in [
             "MobileGetSystemInfo",
             "MobileGetBatteryConfig",
             "MobileGetDevices",
             "MobileGetEquipment",
             "MobileGetInstallation",
+            "MobileGetDeviceStatus",
+            "MobileGetConnectivity",
+            "MobileGetNetworkStatus",
         ]:
             await probe_endpoint(session, jwt, method, loc_payload)
 

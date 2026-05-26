@@ -39,6 +39,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.service_location_id = service_location_id
         self._max_backup_seconds: int = 0  # Track max for % calibration
         self._prev_soc: float | None = None
+        self._last_wifi_ssid: str | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Base Power API."""
@@ -65,6 +66,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             try:
                 wifi = await self.api.get_wifi_metrics(self.service_location_id)
+                # Sticky SSID: only update last-known when the API returns a clean value
+                if wifi.get("ssid"):
+                    self._last_wifi_ssid = wifi["ssid"]
+                elif self._last_wifi_ssid:
+                    wifi["ssid"] = self._last_wifi_ssid
             except Exception as err:
                 _LOGGER.debug("WifiMetrics fetch failed: %s", err)
 
