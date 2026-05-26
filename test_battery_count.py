@@ -327,24 +327,103 @@ async def auth_and_fetch(email: str) -> None:
         else:
             print("  (no data / error)")
 
-        # --- Probe GridStatus ---
+        # --- Probe known-good endpoints ---
         await probe_endpoint(session, jwt, "MobileGetGridStatus", loc_payload)
-
-        # --- Probe UsageCycles (has asset_id) ---
         await probe_endpoint(session, jwt, "MobileGetUsageCycles", loc_payload)
 
-        # --- Try endpoints that might expose equipment/inventory or stable WiFi ---
-        for method in [
+        # --- Broad API scan: find any endpoint whose response contains a target SSID ---
+        SCAN_TARGET = b"USGOV"  # raw bytes to search for in every response
+        CANDIDATE_METHODS = [
+            # Equipment / inventory
             "MobileGetSystemInfo",
             "MobileGetBatteryConfig",
+            "MobileGetBatteryInfo",
+            "MobileGetBatteryStatus",
             "MobileGetDevices",
+            "MobileGetDevice",
+            "MobileGetDeviceInfo",
+            "MobileGetDeviceStatus",
             "MobileGetEquipment",
             "MobileGetInstallation",
-            "MobileGetDeviceStatus",
+            "MobileGetInstallationInfo",
+            "MobileGetAssets",
+            "MobileGetAssetInfo",
+            "MobileGetHome",
+            "MobileGetHomeInfo",
+            "MobileGetSiteInfo",
+            "MobileGetSiteStatus",
+            # Connectivity / network
             "MobileGetConnectivity",
+            "MobileGetConnectivityStatus",
+            "MobileGetNetworkInfo",
             "MobileGetNetworkStatus",
-        ]:
-            await probe_endpoint(session, jwt, method, loc_payload)
+            "MobileGetWifiStatus",
+            "MobileGetWifiInfo",
+            "MobileGetWifiConnection",
+            "MobileGetWifiConfig",
+            # Other dashboard / status
+            "MobileGetStatus",
+            "MobileGetSystemStatus",
+            "MobileGetDashboard",
+            "MobileGetDashboardStatus",
+            "MobileGetDashboardInfo",
+            "MobileGetDashboardData",
+            "MobileGetDashboardSummary",
+            "MobileGetMonitor",
+            "MobileGetSummary",
+            "MobileGetSettings",
+            "MobileGetConfig",
+            "MobileGetConfiguration",
+            "MobileGetLocation",
+            "MobileGetLocationInfo",
+            "MobileGetLocationStatus",
+            "MobileGetLocationDetails",
+            "MobileGetServiceLocation",
+            "MobileGetServiceLocationInfo",
+        ]
+
+        print(f"\n{'#'*60}")
+        print(f"BROAD API SCAN — searching for {SCAN_TARGET!r} in responses")
+        print(f"{'#'*60}")
+        hits = []
+        for method in CANDIDATE_METHODS:
+            url = f"{API_HOST}/{API_SERVICE}/{method}"
+            headers = {
+                "Content-Type": "application/grpc-web+proto",
+                "authorization": jwt,
+                "x-grpc-web": "1",
+            }
+            try:
+                async with session.post(
+                    url, headers=headers, data=build_grpc_frame(loc_payload)
+                ) as resp:
+                    raw = await resp.read()
+                    grpc_status = resp.headers.get("grpc-status", "0")
+                    data = parse_grpc_frame(raw)
+                    has_target = SCAN_TARGET in data
+                    status_str = f"grpc={grpc_status} bytes={len(data)}"
+                    if grpc_status not in ("", "0"):
+                        print(f"  {method:45s}  SKIP  ({status_str})")
+                    elif has_target:
+                        print(f"  {method:45s}  *** HIT ***  ({status_str})")
+                        hits.append((method, data))
+                    else:
+                        print(f"  {method:45s}  miss  ({status_str})")
+            except Exception as e:
+                print(f"  {method:45s}  ERROR  {e}")
+
+        print(f"\n{'#'*60}")
+        if hits:
+            print(f"HITS ({len(hits)}):")
+            for method, data in hits:
+                print(f"\n=== {method} ===")
+                print(f"Raw hex: {data.hex()}")
+                print("Protobuf structure:")
+                dump_protobuf(data)
+        else:
+            print("No endpoints contained the target string.")
+            print("Try running again with a different SCAN_TARGET, or check the SSID spelling.")
+        print(f"{'#'*60}")
 
 
 if __name__ == "__main__":
