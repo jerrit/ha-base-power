@@ -102,6 +102,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._client_token: str = ""
         self._session_id: str = ""
         self._session_jwt: str | None = None
+        self._service_location_id: str = ""
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -168,6 +169,12 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._client_token = result["client_token"]
                     self._session_jwt = result.get("session_jwt")
 
+                    # During reauth, location ID is already known — skip discovery
+                    if self._service_location_id:
+                        return await self.async_step_location(
+                            {CONF_SERVICE_LOCATION_ID: self._service_location_id}
+                        )
+
                     # Auto-discover service location ID
                     try:
                         auth = BasePowerAuth(
@@ -215,6 +222,20 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             service_location_id = user_input[CONF_SERVICE_LOCATION_ID]
+            entry_data = {
+                CONF_EMAIL: self._email,
+                CONF_CLIENT_TOKEN: self._client_token,
+                CONF_SESSION_ID: self._session_id,
+                CONF_SESSION_JWT: self._session_jwt,
+                CONF_SERVICE_LOCATION_ID: service_location_id,
+            }
+
+            # During reauth, update the existing entry instead of creating a new one
+            if self.source == config_entries.SOURCE_REAUTH:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data=entry_data,
+                )
 
             # Set unique ID to prevent duplicates
             await self.async_set_unique_id(service_location_id)
@@ -222,13 +243,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             return self.async_create_entry(
                 title=f"Base Power ({service_location_id})",
-                data={
-                    CONF_EMAIL: self._email,
-                    CONF_CLIENT_TOKEN: self._client_token,
-                    CONF_SESSION_ID: self._session_id,
-                    CONF_SESSION_JWT: self._session_jwt,
-                    CONF_SERVICE_LOCATION_ID: service_location_id,
-                },
+                data=entry_data,
             )
 
         return self.async_show_form(
@@ -244,4 +259,5 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Handle reauthentication."""
         self._email = entry_data.get(CONF_EMAIL, "")
+        self._service_location_id = entry_data.get(CONF_SERVICE_LOCATION_ID, "")
         return await self.async_step_user()
