@@ -29,4 +29,4 @@ CONF_WIFI_SSID = "wifi_ssid"
 CONF_BATTERY_COUNT = "battery_count_override"
 
 # Platforms
-PLATFORMS = ["sensor", "binary_sensor"]
+PLATFORMS = ["sensor", "binary_sensor", "select"]
