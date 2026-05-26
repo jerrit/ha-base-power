@@ -18,6 +18,7 @@ from .const import (
     CONF_SESSION_JWT,
     CONF_SERVICE_LOCATION_ID,
     CONF_WIFI_SSID,
+    CONF_BATTERY_COUNT,
 )
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
@@ -38,17 +39,22 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(data=user_input)
 
         current_ssid = self.config_entry.options.get(CONF_WIFI_SSID, "")
+        current_count = self.config_entry.options.get(CONF_BATTERY_COUNT, 1)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_WIFI_SSID, default=current_ssid): str,
+                    vol.Optional(CONF_BATTERY_COUNT, default=current_count): vol.All(
+                        vol.Coerce(int), vol.Range(min=1, max=10)
+                    ),
                 }
             ),
             description_placeholders={
-                "wifi_ssid_hint": (
-                    "Enter the exact SSID your Base Power battery is connected to "
-                    "(e.g. USGOV). Leave blank to report the strongest visible network."
+                "hints": (
+                    "WiFi SSID: exact SSID your battery is connected to (e.g. USGOV). "
+                    "Leave blank to use strongest visible network.\n"
+                    "Battery Units: number of battery units installed (1 = 25 kWh, 2 = 50 kWh)."
                 )
             },
         )

@@ -12,7 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
-from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT, CONF_WIFI_SSID
+from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT, CONF_WIFI_SSID, CONF_BATTERY_COUNT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,6 +103,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cycles = await self.api.get_usage_cycles(self.service_location_id)
             except Exception as err:
                 _LOGGER.debug("UsageCycles fetch failed: %s", err)
+
+            # Apply user-configured battery count (default 1; overrides API detection)
+            dashboard["battery_count"] = self._config_entry.options.get(CONF_BATTERY_COUNT, 1)
 
             # Derive additional values
             derived = self._derive_values(dashboard, usage)

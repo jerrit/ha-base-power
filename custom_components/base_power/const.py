@@ -26,6 +26,7 @@ CONF_SESSION_JWT = "session_jwt"
 CONF_SERVICE_LOCATION_ID = "service_location_id"
 CONF_EMAIL = "email"
 CONF_WIFI_SSID = "wifi_ssid"
+CONF_BATTERY_COUNT = "battery_count_override"
 
 # Platforms
 PLATFORMS = ["sensor", "binary_sensor"]
