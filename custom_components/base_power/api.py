@@ -454,22 +454,84 @@ class BasePowerApiClient:
 
     @staticmethod
     def _parse_wifi_metrics(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetWifiMetrics response."""
+        """Parse MobileGetWifiMetrics response.
+
+        Response structure:
+          Field 1 (repeated): visible/scanned networks { ssid (str,1), signal (int,2), is_connected (bool,3) }
+          Field 2: connected network { ssid (str,1), signal (int,2) }
+
+        We prefer field 2 (dedicated connected-network field). If absent, we fall back
+        to the field-1 entry flagged is_connected=true.
+        """
         result: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
         if not data or len(data) < 4:
             return result
 
-        if data[0] == 0x0A:
-            inner_len = data[1]
-            inner = data[2 : 2 + inner_len]
-            if inner[0] == 0x0A:
-                ssid_len = inner[1]
-                result["ssid"] = inner[2 : 2 + ssid_len].decode("utf-8")
-                sig_offset = 2 + ssid_len
-                if sig_offset < len(inner) and inner[sig_offset] == 0x10:
-                    result["signal"] = inner[sig_offset + 1]
+        def _parse_network_sub(sub: bytes) -> dict[str, Any]:
+            entry: dict[str, Any] = {"ssid": None, "signal": None, "is_connected": False}
+            off = 0
+            while off < len(sub):
+                tag_val, new_off = _decode_varint(sub, off)
+                if new_off == off:
+                    break
+                off = new_off
+                field_num = tag_val >> 3
+                wire_type = tag_val & 0x07
+                if wire_type == 2:
+                    length, off = _decode_varint(sub, off)
+                    value = sub[off : off + length]
+                    off += length
+                    if field_num == 1:
+                        try:
+                            entry["ssid"] = value.decode("utf-8")
+                        except Exception:
+                            pass
+                elif wire_type == 0:
+                    val, off = _decode_varint(sub, off)
+                    if field_num == 2:
+                        entry["signal"] = val
+                    elif field_num == 3:
+                        entry["is_connected"] = bool(val)
+                else:
+                    off = _skip_field(sub, off, wire_type)
+            return entry
+
+        connected_entry: dict[str, Any] | None = None
+        flagged_entry: dict[str, Any] | None = None
+
+        offset = 0
+        while offset < len(data):
+            tag_val, new_offset = _decode_varint(data, offset)
+            if new_offset == offset:
+                break
+            offset = new_offset
+            field_num = tag_val >> 3
+            wire_type = tag_val & 0x07
+
+            if wire_type == 2:
+                length, offset = _decode_varint(data, offset)
+                sub = data[offset : offset + length]
+                offset += length
+                if field_num == 1:
+                    # Visible/scanned network — check for is_connected flag
+                    entry = _parse_network_sub(sub)
+                    if entry.get("is_connected") and flagged_entry is None:
+                        flagged_entry = entry
+                elif field_num == 2:
+                    # Dedicated connected-network field
+                    connected_entry = _parse_network_sub(sub)
+            elif wire_type == 0:
+                _, offset = _decode_varint(data, offset)
+            else:
+                offset = _skip_field(data, offset, wire_type)
+
+        target = connected_entry or flagged_entry
+        if target and target.get("ssid"):
+            result["ssid"] = target["ssid"]
+            result["signal"] = target["signal"]
             result["connected"] = True
 
+        _LOGGER.debug("WifiMetrics parsed: %s", result)
         return result
 
     @staticmethod
