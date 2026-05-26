@@ -12,7 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
-from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT
+from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT, CONF_WIFI_SSID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         api_client: BasePowerApiClient,
         auth: BasePowerAuth,
         service_location_id: str,
+        config_entry,
     ) -> None:
         """Initialize coordinator."""
         super().__init__(
@@ -37,6 +38,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.api = api_client
         self.auth = auth
         self.service_location_id = service_location_id
+        self._config_entry = config_entry
         self._max_backup_seconds: int = 0  # Track max for % calibration
         self._prev_soc: float | None = None
         self._last_wifi_ssid: str | None = None
@@ -66,9 +68,22 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             try:
                 wifi = await self.api.get_wifi_metrics(self.service_location_id)
-                # Sticky SSID: only update last-known when the API returns a clean value
-                if wifi.get("ssid"):
-                    self._last_wifi_ssid = wifi["ssid"]
+                scan: dict[str, int | None] = wifi.get("scan", {})
+                preferred_ssid: str | None = self._config_entry.options.get(CONF_WIFI_SSID)
+                if preferred_ssid and preferred_ssid in scan:
+                    # User configured a specific SSID — report its signal from the scan
+                    wifi["ssid"] = preferred_ssid
+                    wifi["signal"] = scan[preferred_ssid]
+                    wifi["connected"] = True
+                    self._last_wifi_ssid = preferred_ssid
+                elif scan:
+                    # No preference set — use strongest visible network with sticky fallback
+                    best_ssid = max(scan, key=lambda s: scan[s] or 0)
+                    wifi["ssid"] = best_ssid
+                    wifi["signal"] = scan[best_ssid]
+                    wifi["connected"] = True
+                    if not self._last_wifi_ssid:
+                        self._last_wifi_ssid = best_ssid
                 elif self._last_wifi_ssid:
                     wifi["ssid"] = self._last_wifi_ssid
             except Exception as err:

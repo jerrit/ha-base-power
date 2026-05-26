@@ -456,48 +456,20 @@ class BasePowerApiClient:
     def _parse_wifi_metrics(data: bytes) -> dict[str, Any]:
         """Parse MobileGetWifiMetrics response.
 
-        Response structure:
-          Field 1 (repeated): visible/scanned networks { ssid (str,1), signal (int,2), is_connected (bool,3) }
-          Field 2: connected network { ssid (str,1), signal (int,2) }
+        The API returns a WiFi scan list (field 1, repeated) — signal strengths
+        for all visible networks. There is no "connected" indicator in the response.
+        We return the full scan dict so the coordinator can look up a user-configured
+        SSID, or fall back to the strongest-signal entry.
 
-        We prefer field 2 (dedicated connected-network field). If absent, we fall back
-        to the field-1 entry flagged is_connected=true.
+        Result keys:
+          scan    — {ssid: signal_percent} for every visible network
+          ssid    — None (set by coordinator after SSID preference lookup)
+          signal  — None (set by coordinator)
+          connected — False (set by coordinator)
         """
-        result: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
+        result: dict[str, Any] = {"scan": {}, "ssid": None, "signal": None, "connected": False}
         if not data or len(data) < 4:
             return result
-
-        def _parse_network_sub(sub: bytes) -> dict[str, Any]:
-            entry: dict[str, Any] = {"ssid": None, "signal": None, "is_connected": False}
-            off = 0
-            while off < len(sub):
-                tag_val, new_off = _decode_varint(sub, off)
-                if new_off == off:
-                    break
-                off = new_off
-                field_num = tag_val >> 3
-                wire_type = tag_val & 0x07
-                if wire_type == 2:
-                    length, off = _decode_varint(sub, off)
-                    value = sub[off : off + length]
-                    off += length
-                    if field_num == 1:
-                        try:
-                            entry["ssid"] = value.decode("utf-8")
-                        except Exception:
-                            pass
-                elif wire_type == 0:
-                    val, off = _decode_varint(sub, off)
-                    if field_num == 2:
-                        entry["signal"] = val
-                    elif field_num == 3:
-                        entry["is_connected"] = bool(val)
-                else:
-                    off = _skip_field(sub, off, wire_type)
-            return entry
-
-        connected_entry: dict[str, Any] | None = None
-        flagged_entry: dict[str, Any] | None = None
 
         offset = 0
         while offset < len(data):
@@ -513,25 +485,40 @@ class BasePowerApiClient:
                 sub = data[offset : offset + length]
                 offset += length
                 if field_num == 1:
-                    # Visible/scanned network — check for is_connected flag
-                    entry = _parse_network_sub(sub)
-                    if entry.get("is_connected") and flagged_entry is None:
-                        flagged_entry = entry
-                elif field_num == 2:
-                    # Dedicated connected-network field
-                    connected_entry = _parse_network_sub(sub)
+                    # Scan entry: field 1 = ssid (string), field 2 = signal (varint)
+                    ssid: str | None = None
+                    signal: int | None = None
+                    off = 0
+                    while off < len(sub):
+                        stag, soff = _decode_varint(sub, off)
+                        if soff == off:
+                            break
+                        off = soff
+                        sfn = stag >> 3
+                        swt = stag & 0x07
+                        if swt == 2:
+                            slen, off = _decode_varint(sub, off)
+                            val = sub[off : off + slen]
+                            off += slen
+                            if sfn == 1:
+                                try:
+                                    ssid = val.decode("utf-8")
+                                except Exception:
+                                    pass
+                        elif swt == 0:
+                            ival, off = _decode_varint(sub, off)
+                            if sfn == 2:
+                                signal = ival
+                        else:
+                            off = _skip_field(sub, off, swt)
+                    if ssid:
+                        result["scan"][ssid] = signal
             elif wire_type == 0:
                 _, offset = _decode_varint(data, offset)
             else:
                 offset = _skip_field(data, offset, wire_type)
 
-        target = connected_entry or flagged_entry
-        if target and target.get("ssid"):
-            result["ssid"] = target["ssid"]
-            result["signal"] = target["signal"]
-            result["connected"] = True
-
-        _LOGGER.debug("WifiMetrics parsed: %s", result)
+        _LOGGER.debug("WifiMetrics scan: %s", result["scan"])
         return result
 
     @staticmethod

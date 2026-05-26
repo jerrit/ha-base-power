@@ -177,7 +177,7 @@ async def probe_endpoint(
     return data
 
 
-async def auth_and_fetch(email: str) -> None:
+async def auth_and_fetch(email: str, otp_code: str | None = None) -> None:
     async with aiohttp.ClientSession() as session:
         # --- Authentication (mirrors production auth.py exactly) ---
         print(f"=== Authenticating {email} ===")
@@ -202,22 +202,38 @@ async def auth_and_fetch(email: str) -> None:
                 email_id = f.get("email_address_id")
                 break
 
-        # Step 2: Send OTP
-        print("Sending OTP email...")
-        otp_url = f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/prepare_first_factor?{_NATIVE}"
-        async with session.post(
-            otp_url,
-            headers={**_HEADERS, "Authorization": client_token},
-            data={"strategy": "email_code", "email_address_id": email_id},
-        ) as resp2:
-            if resp2.status != 200:
-                print(f"OTP send failed: {resp2.status} {await resp2.text()}")
+        import json, os
+        STATE_FILE = "/tmp/bp_auth_state.json"
+
+        # If a code was passed on CLI and we have saved state, skip straight to verify
+        if otp_code and os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f:
+                state = json.load(f)
+            sign_in_id = state["sign_in_id"]
+            client_token = state["client_token"]
+            print(f"Resuming sign-in {sign_in_id} with provided OTP code.")
+            os.remove(STATE_FILE)
+        else:
+            # Step 2: Send OTP
+            print("Sending OTP email...")
+            otp_url = f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/prepare_first_factor?{_NATIVE}"
+            async with session.post(
+                otp_url,
+                headers={**_HEADERS, "Authorization": client_token},
+                data={"strategy": "email_code", "email_address_id": email_id},
+            ) as resp2:
+                if resp2.status != 200:
+                    print(f"OTP send failed: {resp2.status} {await resp2.text()}")
+                    return
+                client_token = resp2.headers.get("Authorization", client_token)
+                print("  OTP sent — re-run with the code as a second argument:")
+                print(f"  python3 test_battery_count.py {email} <code>")
+                with open(STATE_FILE, "w") as f:
+                    json.dump({"sign_in_id": sign_in_id, "client_token": client_token}, f)
                 return
-            client_token = resp2.headers.get("Authorization", client_token)
-            print("  OTP sent.")
 
         # Step 3: Verify OTP
-        code = input("Enter the 6-digit code from your email: ").strip()
+        code = otp_code
         verify_url = f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/attempt_first_factor?{_NATIVE}"
         async with session.post(
             verify_url,
@@ -444,4 +460,5 @@ async def auth_and_fetch(email: str) -> None:
 
 if __name__ == "__main__":
     email = sys.argv[1] if len(sys.argv) > 1 else "user@example.com"
-    asyncio.run(auth_and_fetch(email))
+    otp_code = sys.argv[2] if len(sys.argv) > 2 else None
+    asyncio.run(auth_and_fetch(email, otp_code))

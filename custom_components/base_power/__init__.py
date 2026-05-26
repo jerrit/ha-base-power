@@ -46,6 +46,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api_client=api_client,
         auth=auth,
         service_location_id=entry.data[CONF_SERVICE_LOCATION_ID],
+        config_entry=entry,
     )
 
     await coordinator.async_config_entry_first_refresh()

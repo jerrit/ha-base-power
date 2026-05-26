@@ -17,6 +17,7 @@ from .const import (
     CONF_SESSION_ID,
     CONF_SESSION_JWT,
     CONF_SERVICE_LOCATION_ID,
+    CONF_WIFI_SSID,
 )
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
@@ -26,10 +27,42 @@ _LOGGER = logging.getLogger(__name__)
 CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuYmFzZXBvd2VyY29tcGFueS5jb20k"
 
 
+class BasePowerOptionsFlow(config_entries.OptionsFlow):
+    """Handle Base Power options (WiFi SSID preference, etc.)."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show options form."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        current_ssid = self.config_entry.options.get(CONF_WIFI_SSID, "")
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_WIFI_SSID, default=current_ssid): str,
+                }
+            ),
+            description_placeholders={
+                "wifi_ssid_hint": (
+                    "Enter the exact SSID your Base Power battery is connected to "
+                    "(e.g. USGOV). Leave blank to report the strongest visible network."
+                )
+            },
+        )
+
+
 class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Base Power."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        """Return the options flow handler."""
+        return BasePowerOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize flow."""
