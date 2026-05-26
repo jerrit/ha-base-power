@@ -29,7 +29,9 @@ _HEADERS = {
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
     ),
+    "x-mobile": "1",
 }
+_NATIVE = "_is_native=1&_clerk_js_version=" + CLERK_JS_VERSION
 
 
 def decode_varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -177,18 +179,22 @@ async def probe_endpoint(
 
 async def auth_and_fetch(email: str) -> None:
     async with aiohttp.ClientSession() as session:
-        # --- Authentication ---
+        # --- Authentication (mirrors production auth.py exactly) ---
         print(f"=== Authenticating {email} ===")
-        url = f"{CLERK_DOMAIN}/v1/client/sign_ins?_clerk_js_version={CLERK_JS_VERSION}"
-        headers = {**_HEADERS, "Authorization": f"Bearer {PUBLISHABLE_KEY}"}
-        async with session.post(url, headers=headers, data={"identifier": email}) as resp:
+
+        # Step 1: Initiate sign-in
+        url = f"{CLERK_DOMAIN}/v1/client/sign_ins?{_NATIVE}"
+        async with session.post(
+            url,
+            headers={**_HEADERS, "Authorization": f"Bearer {PUBLISHABLE_KEY}"},
+            data={"identifier": email},
+        ) as resp:
             if resp.status != 200:
                 print(f"Sign-in init failed: {resp.status} {await resp.text()}")
                 return
             client_token = resp.headers.get("Authorization", "")
             body = await resp.json()
 
-        sessions = body.get("client", {}).get("sessions", [])
         sign_in_id = body["response"]["id"]
         email_id = None
         for f in body["response"].get("supported_first_factors", []):
@@ -196,46 +202,56 @@ async def auth_and_fetch(email: str) -> None:
                 email_id = f.get("email_address_id")
                 break
 
-        if not sessions:
-            print("No cached session — starting OTP flow...")
-            otp_url = f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/prepare_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
-            async with session.post(
-                otp_url,
-                headers={**_HEADERS, "Authorization": client_token},
-                data={"strategy": "email_code", "email_address_id": email_id},
-            ) as resp2:
-                if resp2.status != 200:
-                    print(f"OTP send failed: {resp2.status} {await resp2.text()}")
-                    return
-                client_token = resp2.headers.get("Authorization", client_token)
-                print("  OTP email sent.")
-
-            code = input("Enter the 6-digit code from your email: ").strip()
-            verify_url = f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/attempt_first_factor?_clerk_js_version={CLERK_JS_VERSION}"
-            async with session.post(
-                verify_url,
-                headers={**_HEADERS, "Authorization": client_token},
-                data={"strategy": "email_code", "code": code},
-            ) as resp3:
-                if resp3.status != 200:
-                    print(f"OTP verify failed: {resp3.status} {await resp3.text()}")
-                    return
-                body = await resp3.json()
-                client_token = resp3.headers.get("Authorization", client_token)
-            sessions = body.get("client", {}).get("sessions", [])
-            if not sessions:
-                print("Still no sessions after OTP — auth failed.")
+        # Step 2: Send OTP
+        print("Sending OTP email...")
+        otp_url = f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/prepare_first_factor?{_NATIVE}"
+        async with session.post(
+            otp_url,
+            headers={**_HEADERS, "Authorization": client_token},
+            data={"strategy": "email_code", "email_address_id": email_id},
+        ) as resp2:
+            if resp2.status != 200:
+                print(f"OTP send failed: {resp2.status} {await resp2.text()}")
                 return
+            client_token = resp2.headers.get("Authorization", client_token)
+            print("  OTP sent.")
+
+        # Step 3: Verify OTP
+        code = input("Enter the 6-digit code from your email: ").strip()
+        verify_url = f"{CLERK_DOMAIN}/v1/client/sign_ins/{sign_in_id}/attempt_first_factor?{_NATIVE}"
+        async with session.post(
+            verify_url,
+            headers={**_HEADERS, "Authorization": client_token},
+            data={"strategy": "email_code", "code": code},
+        ) as resp3:
+            if resp3.status != 200:
+                print(f"OTP verify failed: {resp3.status} {await resp3.text()}")
+                return
+            client_token = resp3.headers.get("Authorization", client_token)
+            body = await resp3.json()
+
+        sessions = body.get("client", {}).get("sessions", [])
+        if not sessions:
+            print("No sessions after OTP — auth failed.")
+            return
 
         session_id = sessions[0]["id"]
-        print(f"Found session: {session_id}")
+        # Grab JWT directly from response if available (avoids extra /tokens call)
+        session_jwt = sessions[0].get("last_active_token", {}).get("jwt")
+        print(f"Found session: {session_id}  jwt_in_response={bool(session_jwt)}")
 
-        jwt_url = f"{CLERK_DOMAIN}/v1/client/sessions/{session_id}/tokens?_clerk_js_version={CLERK_JS_VERSION}"
-        async with session.post(jwt_url, headers=_HEADERS, cookies={"__client": client_token}) as jr:
-            if jr.status != 200:
-                print(f"JWT refresh failed: {jr.status}")
-                return
-            jwt = (await jr.json())["jwt"]
+        if not session_jwt:
+            jwt_url = f"{CLERK_DOMAIN}/v1/client/sessions/{session_id}/tokens?{_NATIVE}"
+            async with session.post(
+                jwt_url, headers={**_HEADERS, "Authorization": client_token}
+            ) as jr:
+                if jr.status != 200:
+                    print(f"JWT refresh failed: {jr.status}")
+                    return
+                client_token = jr.headers.get("Authorization", client_token)
+                session_jwt = (await jr.json())["jwt"]
+
+        jwt = session_jwt
         print(f"Got JWT (len={len(jwt)})")
 
         # --- Probe MobileGetAvailableLocations (no payload) ---
