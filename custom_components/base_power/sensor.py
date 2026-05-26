@@ -551,7 +551,6 @@ class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
 
     _attr_name = "Daily Average Grid Interval"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:chart-bell-curve"
 
