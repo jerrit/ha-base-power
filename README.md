@@ -123,6 +123,11 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 
 ## Changelog
 
+### v1.9.0
+- Add **WiFi Network select entity** — a dropdown on the Base Power device card lets you choose a preferred WiFi network directly from Home Assistant, with available networks populated from a live scan sorted by signal strength
+- Add **WiFi SSID dropdown in options** — the gear icon on the integration page now shows a live list of nearby networks with signal strength percentages instead of a plain text field; selecting "Auto (strongest signal)" clears the preference
+- Add **battery unit count setting** — configure the number of battery units (1–10) via the gear icon on the integration page, useful when auto-detection doesn't match your actual hardware
+
 ### v1.8.0
 - Fix battery count detection for 2-unit (50 kWh) systems — parser now counts repeated Field 3 sub-messages (one per battery unit) in addition to reading sub-field 1, so two-battery installs correctly report capacity and backup time
 - Expanded protobuf debug logging: all unknown top-level fields are now logged with field number and value to aid future API reverse-engineering
