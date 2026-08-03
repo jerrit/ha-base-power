@@ -215,6 +215,52 @@ def _parse_first_location_id(data: bytes) -> str | None:
     return None
 
 
+def _parse_billing_submessage(sub: bytes, result: dict[str, Any]) -> None:
+    """Parse a nested billing sub-message for amount_cents / due_date.
+
+    FIX (see BILLING_PARSER_BUG.md): live captures show MobileGetBillingMetadata
+    wraps its real payload inside a field-1 sub-message instead of exposing
+    amount_cents/due_date as flat top-level fields. Confirmed sample:
+        0a0a 080210a5930118b0880212020802
+        -> field1 (len=10 submsg): { field1=2 (varint), field2=18853 (varint),
+                                      field3=33840 (varint) }
+    field2=18853 lines up with amount_cents in cents ($188.53). field3's meaning
+    is not yet confirmed (could be a billing-period timestamp/marker in a unit
+    we haven't identified) -- logged for further reverse-engineering rather than
+    guessed at. due_date (a string) was not present in this particular sample;
+    if a future capture has it, add a length-delimited field 3 string check here.
+    """
+    offset = 0
+    while offset < len(sub):
+        if offset >= len(sub):
+            break
+        tag = sub[offset]
+        field_num = tag >> 3
+        wire_type = tag & 0x07
+        offset += 1
+
+        if wire_type == 0:  # varint
+            val, offset = _decode_varint(sub, offset)
+            if field_num == 2 and result.get("amount_cents") is None:
+                result["amount_cents"] = val
+            elif field_num not in (1, 2):
+                _LOGGER.debug(
+                    "BillingMetadata submessage: unmapped varint field %d = %d",
+                    field_num, val,
+                )
+        elif wire_type == 2:  # length-delimited (string or nested submessage)
+            length, offset = _decode_varint(sub, offset)
+            payload = sub[offset : offset + length]
+            offset += length
+            if field_num == 3:
+                try:
+                    result["due_date"] = payload.decode("utf-8")
+                except (UnicodeDecodeError, ValueError):
+                    pass
+        else:
+            offset = _skip_field(sub, offset, wire_type)
+
+
 class BasePowerApiClient:
     """Client for the Base Power gRPC-Web API."""
 
@@ -278,6 +324,12 @@ class BasePowerApiClient:
                 )
                 return b""
             data = _parse_grpc_frame(response_data)
+            if not data:
+                _LOGGER.debug(
+                    "%s returned an empty payload (grpc-status=%s) -- this account/"
+                    "hardware may not have this data stream available",
+                    method, grpc_status or "0",
+                )
             return data
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
@@ -651,6 +703,14 @@ class BasePowerApiClient:
           Field 1: grid_to_home_kwh
           Field 2: solar_to_home_kwh
           Field 3: battery_to_home_kwh
+
+        NOTE: as of this patch we have not captured a non-empty payload for this
+        RPC on a real account (see BILLING_PARSER_BUG.md / the upstream issue this
+        patch accompanies) -- MobileGetUsageEnergy returned a genuinely empty
+        gRPC-Web frame (grpc-status 0, zero-length message) on every poll observed.
+        The flat-field parsing below is left as-is since we have no evidence it is
+        wrong, only evidence that it's never been exercised against real data. If
+        you get a non-empty capture, please log an issue with the hex dump.
         """
         result: dict[str, Any] = {
             "grid_to_home_kwh": None,
@@ -693,10 +753,16 @@ class BasePowerApiClient:
     def _parse_billing_metadata(data: bytes) -> dict[str, Any]:
         """Parse MobileGetBillingMetadata response.
 
-        Expected fields:
-          Field 1 (sub-message or string): plan_name
-          Field 2 (varint): amount_cents
-          Field 3 (string): due_date (ISO string or similar)
+        FIX: the original parser assumed amount_cents (field 2, varint) and
+        due_date (field 3, string) were flat top-level fields. A live capture
+        showed the real payload wraps everything inside a field-1 sub-message:
+
+            0a0a 080210a5930118b0880212020802
+            field1 (len=10 submsg): { field1=2, field2=18853, field3=33840 }
+
+        field2=18853 decodes to $188.53 -- a plausible amount_cents value.
+        We now descend into that sub-message. The flat top-level check is kept
+        as a fallback in case other accounts/response versions differ.
         """
         result: dict[str, Any] = {
             "amount_cents": None,
@@ -720,17 +786,27 @@ class BasePowerApiClient:
                 val, offset = _decode_varint(data, offset)
                 if field_num == 2:
                     result["amount_cents"] = val
-            elif wire_type == 2:  # length-delimited (string)
+            elif wire_type == 2:  # length-delimited (string or nested submessage)
                 str_len, offset = _decode_varint(data, offset)
-                str_data = data[offset : offset + str_len]
+                payload = data[offset : offset + str_len]
                 offset += str_len
                 if field_num == 3:
                     try:
-                        result["due_date"] = str_data.decode("utf-8")
+                        result["due_date"] = payload.decode("utf-8")
+                        continue
                     except (UnicodeDecodeError, ValueError):
                         pass
+                # Not a top-level due_date string -- try it as a nested submessage
+                # (this is the shape we've actually observed in the wild).
+                _parse_billing_submessage(payload, result)
             else:
                 offset = _skip_field(data, offset, wire_type)
 
+        if result["amount_cents"] is None and result["due_date"] is None:
+            _LOGGER.debug(
+                "BillingMetadata: no known fields found in payload; raw=%s -- "
+                "API shape may differ for this account, please report",
+                data.hex(),
+            )
         _LOGGER.debug("BillingMetadata parsed: %s", result)
         return result

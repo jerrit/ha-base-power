@@ -113,9 +113,23 @@ class BasePowerGridStatusSensor(BasePowerBinarySensorBase):
 
     @property
     def is_on(self) -> bool | None:
-        """Return True if grid power is available (no outage)."""
+        """Return True if grid power is available (no outage).
+
+        FIX: this used to default to True (`.get("grid_is_up", True)`) whenever
+        the GridStatus RPC returned no telemetry at all -- which, on this
+        integration's own account testing, happens routinely (see
+        BILLING_PARSER_BUG.md / upstream issue). For an outage-detection sensor,
+        silently asserting "grid is fine" when we actually have no data is the
+        wrong failure mode: if a real outage coincides with the telemetry call
+        failing, users would see a false "on". Now we only report a value when
+        GridStatus actually returned data this cycle; otherwise we report
+        unknown (None) rather than guessing.
+        """
         if self.coordinator.data:
-            return self.coordinator.data.get("grid", {}).get("grid_is_up", True)
+            grid = self.coordinator.data.get("grid", {})
+            if not grid.get("available", False):
+                return None
+            return grid.get("grid_is_up", True)
         return None
 
 
