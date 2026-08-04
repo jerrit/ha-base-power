@@ -140,15 +140,25 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 derived["estimated_backup_hours"] = None
 
-            # Battery charging/discharging: infer from SoC delta between polls
+            # Battery charging/discharging: infer from SoC delta between polls.
+            # At/near 100% SoC the delta can never go positive again (nothing
+            # left to charge into), so a stable reading there means "full,
+            # not charging" rather than a genuine unknown -- report False
+            # instead of leaving it ambiguous, since that's the state most
+            # owners will see most of the time.
+            FULL_SOC_THRESHOLD = 99.5
             if battery_percent is not None and self._prev_soc is not None:
                 delta = battery_percent - self._prev_soc
                 if delta > 0.5:
                     derived["battery_charging"] = True
                 elif delta < -0.5:
                     derived["battery_charging"] = False
+                elif battery_percent >= FULL_SOC_THRESHOLD:
+                    derived["battery_charging"] = False
                 else:
                     derived["battery_charging"] = None
+            elif battery_percent is not None and battery_percent >= FULL_SOC_THRESHOLD:
+                derived["battery_charging"] = False
             else:
                 derived["battery_charging"] = None
             self._prev_soc = battery_percent
