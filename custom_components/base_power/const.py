@@ -18,6 +18,7 @@ GRID_SCAN_INTERVAL_SECONDS = 60  # 1 minute
 # Battery
 BATTERY_CAPACITY_PER_UNIT_KWH = 25  # Each Base Power battery is 25 kWh
 DEFAULT_BATTERY_COUNT = 1  # Fallback if API doesn't report count
+CONF_CAPACITY_KWH_OVERRIDE = "capacity_kwh_override"  # Manual override for non-25kWh hardware (e.g. 39.2/78.4kWh Core)
 
 # Config keys
 CONF_CLIENT_TOKEN = "client_token"
