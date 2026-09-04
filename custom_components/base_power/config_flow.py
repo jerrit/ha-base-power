@@ -24,6 +24,7 @@ from .const import (
     CONF_SERVICE_LOCATION_ID,
     CONF_WIFI_SSID,
     CONF_BATTERY_COUNT,
+    CONF_CAPACITY_KWH_OVERRIDE,
 )
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
@@ -45,6 +46,7 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
 
         current_ssid = self.config_entry.options.get(CONF_WIFI_SSID, "")
         current_count = self.config_entry.options.get(CONF_BATTERY_COUNT, 1)
+        current_capacity_override = self.config_entry.options.get(CONF_CAPACITY_KWH_OVERRIDE, 0.0)
 
         # Pull live WiFi scan from the running coordinator (no extra API call needed)
         scan: dict[str, int | None] = {}
@@ -78,7 +80,10 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(CONF_WIFI_SSID, default=current_ssid): ssid_field,
                     vol.Optional(CONF_BATTERY_COUNT, default=current_count): vol.All(
                         vol.Coerce(int), vol.Range(min=1, max=10)
-                    ),
+                        ) ,
+                        vol.Optional(
+                        CONF_CAPACITY_KWH_OVERRIDE, default=current_capacity_override
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
                 }
             ),
         )
