@@ -14,6 +14,9 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
 )
 
 from .const import (
@@ -24,6 +27,8 @@ from .const import (
     CONF_SERVICE_LOCATION_ID,
     CONF_WIFI_SSID,
     CONF_BATTERY_COUNT,
+    CONF_UNIT_CAPACITY,
+    BATTERY_CAPACITY_PER_UNIT_KWH,
 )
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
@@ -45,6 +50,9 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
 
         current_ssid = self.config_entry.options.get(CONF_WIFI_SSID, "")
         current_count = self.config_entry.options.get(CONF_BATTERY_COUNT, 1)
+        current_capacity = self.config_entry.options.get(
+            CONF_UNIT_CAPACITY, BATTERY_CAPACITY_PER_UNIT_KWH
+        )
 
         # Pull live WiFi scan from the running coordinator (no extra API call needed)
         scan: dict[str, int | None] = {}
@@ -78,6 +86,15 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(CONF_WIFI_SSID, default=current_ssid): ssid_field,
                     vol.Optional(CONF_BATTERY_COUNT, default=current_count): vol.All(
                         vol.Coerce(int), vol.Range(min=1, max=10)
+                    ),
+                    vol.Optional(CONF_UNIT_CAPACITY, default=current_capacity): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1,
+                            max=100,
+                            step=0.1,
+                            unit_of_measurement="kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
                     ),
                 }
             ),

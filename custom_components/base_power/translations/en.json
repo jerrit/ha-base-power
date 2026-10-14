@@ -38,11 +38,13 @@
         "title": "Base Power Options",
         "data": {
           "wifi_ssid": "Battery WiFi Network",
-          "battery_count_override": "Number of Battery Units"
+          "battery_count_override": "Number of Battery Units",
+          "battery_unit_capacity_kwh": "Capacity per Battery Unit"
         },
         "data_description": {
           "wifi_ssid": "Select the WiFi network your battery is connected to. Signal strength is shown in parentheses.",
-          "battery_count_override": "Number of battery units installed (1 unit = 25 kWh capacity)."
+          "battery_count_override": "Number of battery units installed.",
+          "battery_unit_capacity_kwh": "Usable capacity of each battery unit in kWh (e.g. 25 or 40). System capacity = units × capacity per unit."
         }
       }
     }

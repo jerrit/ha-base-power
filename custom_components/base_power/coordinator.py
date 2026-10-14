@@ -12,7 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
-from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT, CONF_WIFI_SSID, CONF_BATTERY_COUNT
+from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT, CONF_WIFI_SSID, CONF_BATTERY_COUNT, CONF_UNIT_CAPACITY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,6 +106,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Apply user-configured battery count (default 1; overrides API detection)
             dashboard["battery_count"] = self._config_entry.options.get(CONF_BATTERY_COUNT, 1)
+            dashboard["unit_capacity_kwh"] = self._config_entry.options.get(
+                CONF_UNIT_CAPACITY, BATTERY_CAPACITY_PER_UNIT_KWH
+            )
 
             # Derive additional values
             derived = self._derive_values(dashboard, usage)
@@ -191,7 +194,8 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> dict[str, Any]:
         """Derive additional sensor values from raw data."""
         battery_count = dashboard.get("battery_count", DEFAULT_BATTERY_COUNT)
-        capacity_kwh = battery_count * BATTERY_CAPACITY_PER_UNIT_KWH
+        unit_capacity_kwh = dashboard.get("unit_capacity_kwh", BATTERY_CAPACITY_PER_UNIT_KWH)
+        capacity_kwh = round(battery_count * unit_capacity_kwh, 1)
 
         derived: dict[str, Any] = {
             "battery_percent": None,
