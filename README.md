@@ -9,13 +9,13 @@
 
 Unofficial Home Assistant integration for [Base Power](https://basepowercompany.com/) home battery systems. This project is not affiliated with or endorsed by Base Power.
 
-> Monitor your Base Power battery level, power usage, backup time, and energy consumption directly in Home Assistant. Supports 25 kWh and 40 kWh battery units, in single or multi-unit configurations.
+> Monitor your Base Power battery level, power usage, backup time, and energy consumption directly in Home Assistant. Supports single and dual battery configurations (25 kWh per unit).
 
 ## Features
 
 - **Battery Level** — Real SoC% from the GridStatus API (15-min resolution)
 - **Backup Time** — Dynamic estimate: `(SoC% × capacity kWh) ÷ avg home power kW`
-- **System Capacity** — Battery count × capacity per unit (configurable; defaults to 25 kWh)
+- **System Capacity** — Auto-detected from API (25 kWh × battery count)
 - **Current Power** — Real-time power consumption (watts)
 - **Grid Power** — Current draw in amps from the latest 15-min grid reading
 - **Energy Monitoring** — 15-minute interval energy data compatible with HA Energy Dashboard
@@ -65,7 +65,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 | Battery Backup Time | Hours of backup remaining | hours |
 | Battery Count | Number of battery units detected | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
-| System Capacity | Total capacity (count × capacity per unit) | kWh |
+| System Capacity | Total capacity (count × 25 kWh) | kWh |
 | Current Power | Current power draw | W |
 | Current Interval Energy | Energy for current 15-min period | kWh |
 | Daily Peak | Highest 15-min interval today | kWh |
@@ -116,15 +116,12 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
 - **Polling Interval**: 5 minutes
-- **Battery**: Capacity per unit is configurable in options (default 25 kWh; set 40 for a 40 kWh unit)
+- **Battery**: 25 kWh per unit, auto-detects 1 or 2 battery configurations
 - **Battery %**: Real SoC% from `MobileGetGridStatus` 15-min time series
 - **Backup Time**: Computed as `(SoC% × capacity kWh) ÷ avg home power kW` from today's usage intervals
 - **Service Location ID**: Auto-discovered via `MobileGetAvailableLocations` — not required during setup
 
 ## Changelog
-
-### Unreleased
-- Add **capacity per battery unit setting** — set the usable capacity of each unit (e.g. 40 kWh) via the gear icon on the integration page; System Capacity and Backup Time use it. Defaults to 25 kWh, so existing installs are unchanged
 
 ### v1.9.0
 - Add **WiFi Network select entity** — a dropdown on the Base Power device card lets you choose a preferred WiFi network directly from Home Assistant, with available networks populated from a live scan sorted by signal strength

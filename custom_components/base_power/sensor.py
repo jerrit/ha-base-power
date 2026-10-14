@@ -165,7 +165,7 @@ class BasePowerCapacitySensor(BasePowerSensorBase):
         self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_capacity"
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> int | None:
         """Return total system capacity in kWh."""
         if self.coordinator.data:
             return self.coordinator.data["derived"].get("capacity_kwh")
