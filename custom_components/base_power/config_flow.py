@@ -28,6 +28,7 @@ from .const import (
     BATTERY_CAPACITY_OPTIONS,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_BATTERY_COUNT,
+    canonical_battery_capacity,
 )
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
@@ -48,8 +49,10 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(data=user_input)
 
         current_ssid = self.config_entry.options.get(CONF_WIFI_SSID, "")
-        current_capacity = self.config_entry.options.get(CONF_BATTERY_CAPACITY)
-        if current_capacity not in BATTERY_CAPACITY_OPTIONS:
+        current_capacity = canonical_battery_capacity(
+            self.config_entry.options.get(CONF_BATTERY_CAPACITY)
+        )
+        if current_capacity is None:
             legacy_count = self.config_entry.options.get(CONF_BATTERY_COUNT, DEFAULT_BATTERY_COUNT)
             current_capacity = (
                 "50 kWh (2 units)" if legacy_count == 2 else DEFAULT_BATTERY_CAPACITY

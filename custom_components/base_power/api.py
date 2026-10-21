@@ -215,6 +215,42 @@ def _parse_first_location_id(data: bytes) -> str | None:
     return None
 
 
+def _parse_billing_fields(data: bytes, result: dict[str, Any], *, nested: bool = False) -> None:
+    """Read amount_cents and due_date from a billing message."""
+    offset = 0
+    while offset < len(data):
+        tag_val, new_offset = _decode_varint(data, offset)
+        if new_offset == offset:
+            break
+        offset = new_offset
+        field_num = tag_val >> 3
+        wire_type = tag_val & 0x07
+
+        if wire_type == 0:
+            val, offset = _decode_varint(data, offset)
+            if field_num == 2 and result.get("amount_cents") is None:
+                result["amount_cents"] = val
+        elif wire_type == 2:
+            length, offset = _decode_varint(data, offset)
+            if offset + length > len(data):
+                break
+            payload = data[offset : offset + length]
+            offset += length
+            if field_num == 3 and payload and result.get("due_date") is None:
+                try:
+                    text = payload.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = ""
+                if text and text.isprintable():
+                    result["due_date"] = text
+                    continue
+            # Live captures nest amount_cents inside field 1.
+            if field_num == 1 and payload and not nested and result.get("amount_cents") is None:
+                _parse_billing_fields(payload, result, nested=True)
+        else:
+            offset = _skip_field(data, offset, wire_type)
+
+
 class BasePowerApiClient:
     """Client for the Base Power gRPC-Web API."""
 
@@ -255,8 +291,14 @@ class BasePowerApiClient:
             _LOGGER.debug("Location discovery request failed", exc_info=True)
             return None
 
-    async def _call(self, method: str, payload: bytes = b"") -> bytes:
-        """Make a gRPC-Web API call."""
+    async def _call(
+        self, method: str, payload: bytes = b"", *, optional: bool = False
+    ) -> bytes:
+        """Make a gRPC-Web API call.
+
+        Optional calls log a missing contract or empty frame at debug. Those
+        responses are normal for some accounts and must not fill the error log.
+        """
         url = f"{API_HOST}/{API_SERVICE}/{method}"
         headers = {
             "Content-Type": API_CONTENT_TYPE,
@@ -270,7 +312,8 @@ class BasePowerApiClient:
             grpc_status = resp.headers.get("grpc-status", "")
             if grpc_status and grpc_status != "0":
                 grpc_message = resp.headers.get("grpc-message", "unknown")
-                _LOGGER.error(
+                log = _LOGGER.debug if optional else _LOGGER.error
+                log(
                     "gRPC error calling %s: status=%s message=%s",
                     method,
                     grpc_status,
@@ -278,6 +321,8 @@ class BasePowerApiClient:
                 )
                 return b""
             data = _parse_grpc_frame(response_data)
+            if not data:
+                _LOGGER.debug("%s returned an empty payload", method)
             return data
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
@@ -295,31 +340,31 @@ class BasePowerApiClient:
     async def get_grid_status(self, service_location_id: str) -> dict[str, Any]:
         """Get grid status (outage status, battery remaining hours)."""
         payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetGridStatus", payload)
+        data = await self._call("MobileGetGridStatus", payload, optional=True)
         return self._parse_grid_status(data)
 
     async def get_usage_energy(self, service_location_id: str) -> dict[str, Any]:
         """Get energy breakdown (grid-to-home, solar-to-home kWh)."""
         payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetUsageEnergy", payload)
+        data = await self._call("MobileGetUsageEnergy", payload, optional=True)
         return self._parse_usage_energy(data)
 
     async def get_billing_metadata(self, service_location_id: str) -> dict[str, Any]:
         """Get billing info (amount, due date)."""
         payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetBillingMetadata", payload)
+        data = await self._call("MobileGetBillingMetadata", payload, optional=True)
         return self._parse_billing_metadata(data)
 
     async def get_wifi_metrics(self, service_location_id: str) -> dict[str, Any]:
         """Get battery WiFi connectivity metrics."""
         payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetWifiMetrics", payload)
+        data = await self._call("MobileGetWifiMetrics", payload, optional=True)
         return self._parse_wifi_metrics(data)
 
     async def get_usage_cycles(self, service_location_id: str) -> dict[str, Any]:
         """Get usage cycle dates and asset ID."""
         payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetUsageCycles", payload)
+        data = await self._call("MobileGetUsageCycles", payload, optional=True)
         return self._parse_usage_cycles(data)
 
     @staticmethod
@@ -557,7 +602,7 @@ class BasePowerApiClient:
         """
         result: dict[str, Any] = {
             "available": False,
-            "grid_is_up": True,
+            "grid_is_up": None,
             "battery_soc_percent": None,
             "battery_remaining_seconds": 0,
             "current_power_amps": None,
@@ -693,10 +738,9 @@ class BasePowerApiClient:
     def _parse_billing_metadata(data: bytes) -> dict[str, Any]:
         """Parse MobileGetBillingMetadata response.
 
-        Expected fields:
-          Field 1 (sub-message or string): plan_name
-          Field 2 (varint): amount_cents
-          Field 3 (string): due_date (ISO string or similar)
+        Some accounts return amount_cents as a top-level field 2 varint.
+        Others wrap it in a field 1 sub-message, for example
+        0a0a080210a5930118b0880212020802 → field 2 = 18853 ($188.53).
         """
         result: dict[str, Any] = {
             "amount_cents": None,
@@ -706,31 +750,6 @@ class BasePowerApiClient:
             return result
 
         _LOGGER.debug("BillingMetadata raw hex: %s", data.hex())
-
-        offset = 0
-        while offset < len(data):
-            if offset >= len(data):
-                break
-            tag = data[offset]
-            field_num = tag >> 3
-            wire_type = tag & 0x07
-            offset += 1
-
-            if wire_type == 0:  # varint
-                val, offset = _decode_varint(data, offset)
-                if field_num == 2:
-                    result["amount_cents"] = val
-            elif wire_type == 2:  # length-delimited (string)
-                str_len, offset = _decode_varint(data, offset)
-                str_data = data[offset : offset + str_len]
-                offset += str_len
-                if field_num == 3:
-                    try:
-                        result["due_date"] = str_data.decode("utf-8")
-                    except (UnicodeDecodeError, ValueError):
-                        pass
-            else:
-                offset = _skip_field(data, offset, wire_type)
-
+        _parse_billing_fields(data, result)
         _LOGGER.debug("BillingMetadata parsed: %s", result)
         return result

@@ -9,13 +9,13 @@
 
 Unofficial Home Assistant integration for [Base Power](https://basepowercompany.com/) home battery systems. This project is not affiliated with or endorsed by Base Power.
 
-> Monitor your Base Power battery level, power usage, backup time, and energy consumption directly in Home Assistant. Supports 25 kWh, 40 kWh, and 50 kWh systems.
+> Monitor your Base Power battery level, power usage, backup time, and energy consumption directly in Home Assistant. Supports original 25/50 kWh systems and Base Core 39.2/78.4 kWh systems.
 
 ## Features
 
 - **Battery Level** — Real SoC% from the GridStatus API (15-min resolution)
 - **Backup Time** — Dynamic estimate: `(SoC% × capacity kWh) ÷ avg home power kW`
-- **System Capacity** — 25 kWh, 40 kWh, or 50 kWh, chosen in the integration options
+- **System Capacity** — 25, 39.2, 50, or 78.4 kWh, chosen in the integration options
 - **Current Power** — Real-time power consumption (watts)
 - **Grid Power** — Current draw in amps from the latest 15-min grid reading
 - **Energy Monitoring** — 15-minute interval energy data compatible with HA Energy Dashboard
@@ -116,12 +116,21 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
 - **Polling Interval**: 5 minutes
-- **Battery**: 25 kWh (1 unit), 40 kWh (1 unit), or 50 kWh (2 units), set in the integration options
+- **Battery**: 25 kWh, 39.2 kWh (Core), 50 kWh, or 78.4 kWh (2 Core), set in the integration options
 - **Battery %**: Real SoC% from `MobileGetGridStatus` 15-min time series
 - **Backup Time**: Computed as `(SoC% × capacity kWh) ÷ avg home power kW` from today's usage intervals
 - **Service Location ID**: Auto-discovered via `MobileGetAvailableLocations` — not required during setup
 
 ## Changelog
+
+### v1.11.0
+- Nameplate capacity choices are now 25, 39.2, 50, and 78.4 kWh. Base Core is 39.2 kWh per unit, not a rounded 40.
+- Grid Power stays unknown when grid telemetry is missing, instead of reporting that the grid is up.
+- Battery Charging reports off while state of charge stays full, instead of unknown.
+- Battery Level no longer reads 100% from the first backup-time sample after a restart. The `source` attribute says whether a reading came from grid telemetry.
+- Bill amount is read from the nested billing message some accounts return.
+- A missing usage-cycle contract is logged at debug instead of filling the error log every poll.
+- Drop `aiohttp` from manifest requirements so hassfest passes. Home Assistant already provides it.
 
 ### v1.10.0
 - Replace the battery unit-count field with a capacity choice: 25 kWh, 40 kWh, or 50 kWh. A 40 kWh single unit is no longer stored as 25 kWh. Existing integer settings keep working until the options are saved again.

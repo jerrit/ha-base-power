@@ -113,10 +113,17 @@ class BasePowerGridStatusSensor(BasePowerBinarySensorBase):
 
     @property
     def is_on(self) -> bool | None:
-        """Return True if grid power is available (no outage)."""
-        if self.coordinator.data:
-            return self.coordinator.data.get("grid", {}).get("grid_is_up", True)
-        return None
+        """Return True if grid power is available (no outage).
+
+        Unknown when this poll has no grid telemetry. Guessing "on" reports
+        a false all-clear during an outage.
+        """
+        if not self.coordinator.data:
+            return None
+        grid = self.coordinator.data.get("grid") or {}
+        if not grid.get("available"):
+            return None
+        return grid.get("grid_is_up")
 
 
 class BasePowerBatteryChargingSensor(BasePowerBinarySensorBase):

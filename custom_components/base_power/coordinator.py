@@ -19,7 +19,7 @@ from .const import (
     CONF_WIFI_SSID,
     CONF_BATTERY_COUNT,
     CONF_BATTERY_CAPACITY,
-    BATTERY_CAPACITY_OPTIONS,
+    resolve_battery_capacity,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,8 +48,16 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.service_location_id = service_location_id
         self._config_entry = config_entry
         self._max_backup_seconds: int = 0  # Track max for % calibration
+        self._backup_seconds_varied = False
         self._prev_soc: float | None = None
         self._last_wifi_ssid: str | None = None
+        self._last_energy: dict[str, Any] = {
+            "grid_to_home_kwh": None,
+            "solar_to_home_kwh": None,
+            "battery_to_home_kwh": None,
+        }
+        self._last_billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
+        self._last_cycles: dict[str, Any] = {"asset_id": None}
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Base Power API."""
@@ -63,11 +71,17 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             usage = await self.api.get_recent_usage(self.service_location_id)
 
             # Fetch optional data (non-fatal if they fail)
-            grid: dict[str, Any] = {"available": False, "grid_is_up": True, "battery_soc_percent": None, "battery_remaining_seconds": 0, "current_power_amps": None, "hourly_usage": []}
+            # An empty grid poll must stay unknown. Do not reuse an older
+            # "grid is up" reading, or an outage that stops telemetry looks fine.
+            grid: dict[str, Any] = {
+                "available": False,
+                "grid_is_up": None,
+                "battery_soc_percent": None,
+                "battery_remaining_seconds": 0,
+                "current_power_amps": None,
+                "hourly_usage": [],
+            }
             wifi: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
-            energy: dict[str, Any] = {"grid_to_home_kwh": None, "solar_to_home_kwh": None, "battery_to_home_kwh": None}
-            billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
-            cycles: dict[str, Any] = {"asset_id": None}
 
             try:
                 grid = await self.api.get_grid_status(self.service_location_id)
@@ -98,24 +112,35 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("WifiMetrics fetch failed: %s", err)
 
             try:
-                energy = await self.api.get_usage_energy(self.service_location_id)
+                fetched_energy = await self.api.get_usage_energy(self.service_location_id)
+                if any(value is not None for value in fetched_energy.values()):
+                    self._last_energy = fetched_energy
             except Exception as err:
                 _LOGGER.debug("UsageEnergy fetch failed: %s", err)
+            energy = self._last_energy
 
             try:
-                billing = await self.api.get_billing_metadata(self.service_location_id)
+                fetched_billing = await self.api.get_billing_metadata(self.service_location_id)
+                if any(value is not None for value in fetched_billing.values()):
+                    self._last_billing = fetched_billing
             except Exception as err:
                 _LOGGER.debug("BillingMetadata fetch failed: %s", err)
+            billing = self._last_billing
 
             try:
-                cycles = await self.api.get_usage_cycles(self.service_location_id)
+                fetched_cycles = await self.api.get_usage_cycles(self.service_location_id)
+                if any(value is not None for value in fetched_cycles.values()):
+                    self._last_cycles = fetched_cycles
             except Exception as err:
                 _LOGGER.debug("UsageCycles fetch failed: %s", err)
+            cycles = self._last_cycles
 
             # Capacity dropdown wins. Older installs still store an integer unit count.
-            capacity_label = self._config_entry.options.get(CONF_BATTERY_CAPACITY)
-            if capacity_label in BATTERY_CAPACITY_OPTIONS:
-                units, kwh = BATTERY_CAPACITY_OPTIONS[capacity_label]
+            resolved = resolve_battery_capacity(
+                self._config_entry.options.get(CONF_BATTERY_CAPACITY)
+            )
+            if resolved is not None:
+                units, kwh = resolved
             else:
                 units = self._config_entry.options.get(CONF_BATTERY_COUNT, DEFAULT_BATTERY_COUNT)
                 kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
@@ -125,17 +150,29 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Derive additional values
             derived = self._derive_values(dashboard, usage)
 
-            # Battery percentage: prefer SoC from grid status, fall back to calibration
+            # Battery percentage: prefer SoC from grid status.
+            # The backup-seconds ratio is only used after that value has moved.
+            # The first sample always equals the max, so reporting it makes
+            # every restart look like 100% when grid telemetry is missing.
+            derived["battery_percent_source"] = None
+            backup_seconds = dashboard.get("backup_seconds", 0)
             if grid.get("battery_soc_percent") is not None:
                 derived["battery_percent"] = grid["battery_soc_percent"]
-            else:
-                backup_seconds = dashboard.get("backup_seconds", 0)
-                if backup_seconds > self._max_backup_seconds:
+                derived["battery_percent_source"] = "grid_status"
+            elif backup_seconds > 0:
+                if self._max_backup_seconds == 0:
                     self._max_backup_seconds = backup_seconds
-                if self._max_backup_seconds > 0 and backup_seconds > 0:
+                elif backup_seconds > self._max_backup_seconds:
+                    self._max_backup_seconds = backup_seconds
+                    self._backup_seconds_varied = True
+                elif backup_seconds < self._max_backup_seconds:
+                    self._backup_seconds_varied = True
+                if self._backup_seconds_varied and self._max_backup_seconds > 0:
                     derived["battery_percent"] = round(
                         min((backup_seconds / self._max_backup_seconds) * 100, 100.0), 1
                     )
+                    derived["battery_percent_source"] = "estimated_from_backup_time"
+            dashboard["backup_seconds_live"] = self._backup_seconds_varied
 
             # Estimated backup hours: (SoC% × capacity_kWh) ÷ avg_home_power_kW
             battery_percent = derived.get("battery_percent")
@@ -155,15 +192,20 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 derived["estimated_backup_hours"] = None
 
-            # Battery charging/discharging: infer from SoC delta between polls
+            # SoC at a full battery cannot rise, so a flat 100% is "not charging".
+            full_soc = 99.5
             if battery_percent is not None and self._prev_soc is not None:
                 delta = battery_percent - self._prev_soc
                 if delta > 0.5:
                     derived["battery_charging"] = True
                 elif delta < -0.5:
                     derived["battery_charging"] = False
+                elif battery_percent >= full_soc:
+                    derived["battery_charging"] = False
                 else:
                     derived["battery_charging"] = None
+            elif battery_percent is not None and battery_percent >= full_soc:
+                derived["battery_charging"] = False
             else:
                 derived["battery_charging"] = None
             self._prev_soc = battery_percent
