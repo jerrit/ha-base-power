@@ -47,8 +47,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.auth = auth
         self.service_location_id = service_location_id
         self._config_entry = config_entry
-        self._max_backup_seconds: int = 0  # Track max for % calibration
-        self._backup_seconds_varied = False
+        self._numeric_service_location_id: int | None = None
         self._prev_soc: float | None = None
         self._last_energy: dict[str, Any] = {
             "grid_to_home_kwh": None,
@@ -69,23 +68,14 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dashboard = await self.api.get_dashboard_root(self.service_location_id)
             usage = await self.api.get_recent_usage(self.service_location_id)
 
-            # Fetch optional data (non-fatal if they fail)
+            # Fetch optional data (non-fatal if they fail).
             # An empty grid poll must stay unknown. Do not reuse an older
             # "grid is up" reading, or an outage that stops telemetry looks fine.
-            grid: dict[str, Any] = {
-                "available": False,
-                "grid_is_up": None,
-                "battery_soc_percent": None,
-                "battery_remaining_seconds": 0,
-                "current_power_amps": None,
-                "hourly_usage": [],
-            }
+            numeric_id = dashboard.get("service_location_id")
+            if numeric_id:
+                self._numeric_service_location_id = numeric_id
+            grid = await self._async_fetch_grid(self._numeric_service_location_id)
             wifi: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
-
-            try:
-                grid = await self.api.get_grid_status(self.service_location_id)
-            except Exception as err:
-                _LOGGER.debug("GridStatus fetch failed: %s", err)
 
             try:
                 wifi = await self.api.get_wifi_metrics(self.service_location_id)
@@ -138,68 +128,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dashboard["battery_count"] = units
             dashboard["capacity_kwh"] = kwh
 
-            # Derive additional values
+            # Derive additional values, then overlay live service-context readings.
             derived = self._derive_values(dashboard, usage)
-
-            # Battery percentage: prefer SoC from grid status.
-            # The backup-seconds ratio is only used after that value has moved.
-            # The first sample always equals the max, so reporting it makes
-            # every restart look like 100% when grid telemetry is missing.
-            derived["battery_percent_source"] = None
-            backup_seconds = dashboard.get("backup_seconds", 0)
-            if grid.get("battery_soc_percent") is not None:
-                derived["battery_percent"] = grid["battery_soc_percent"]
-                derived["battery_percent_source"] = "grid_status"
-            elif backup_seconds > 0:
-                if self._max_backup_seconds == 0:
-                    self._max_backup_seconds = backup_seconds
-                elif backup_seconds > self._max_backup_seconds:
-                    self._max_backup_seconds = backup_seconds
-                    self._backup_seconds_varied = True
-                elif backup_seconds < self._max_backup_seconds:
-                    self._backup_seconds_varied = True
-                if self._backup_seconds_varied and self._max_backup_seconds > 0:
-                    derived["battery_percent"] = round(
-                        min((backup_seconds / self._max_backup_seconds) * 100, 100.0), 1
-                    )
-                    derived["battery_percent_source"] = "estimated_from_backup_time"
-            dashboard["backup_seconds_live"] = self._backup_seconds_varied
-
-            # Estimated backup hours: (SoC% × capacity_kWh) ÷ avg_home_power_kW
-            battery_percent = derived.get("battery_percent")
-            intervals = derived.get("intervals_today", 0)
-            daily_total = derived.get("daily_total_kwh", 0.0)
-            capacity_kwh = derived.get("capacity_kwh", 0.0)
-            if (
-                battery_percent is not None
-                and battery_percent > 0
-                and intervals > 0
-                and daily_total > 0
-                and capacity_kwh > 0
-            ):
-                avg_power_kw = daily_total / (intervals / 4)
-                battery_energy_kwh = battery_percent / 100 * capacity_kwh
-                derived["estimated_backup_hours"] = round(battery_energy_kwh / avg_power_kw, 1)
-            else:
-                derived["estimated_backup_hours"] = None
-
-            # SoC at a full battery cannot rise, so a flat 100% is "not charging".
-            full_soc = 99.5
-            if battery_percent is not None and self._prev_soc is not None:
-                delta = battery_percent - self._prev_soc
-                if delta > 0.5:
-                    derived["battery_charging"] = True
-                elif delta < -0.5:
-                    derived["battery_charging"] = False
-                elif battery_percent >= full_soc:
-                    derived["battery_charging"] = False
-                else:
-                    derived["battery_charging"] = None
-            elif battery_percent is not None and battery_percent >= full_soc:
-                derived["battery_charging"] = False
-            else:
-                derived["battery_charging"] = None
-            self._prev_soc = battery_percent
+            self._apply_live_readings(derived, grid)
 
             # Self-sufficiency and total home consumption from energy data
             grid_kwh = energy.get("grid_to_home_kwh") or 0.0
@@ -233,15 +164,71 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             raise UpdateFailed(f"Error communicating with Base Power API: {err}") from err
 
+    async def _async_fetch_grid(self, numeric_id: int | None) -> dict[str, Any]:
+        """Read service context and grid voltage for the numeric location id."""
+        context = self.api._empty_service_context()
+        voltage = self.api._empty_grid_voltage()
+        if not numeric_id:
+            _LOGGER.debug("No numeric service location id yet")
+            return self.api.combine_grid_telemetry(context, voltage)
+        try:
+            context = await self.api.get_service_context(numeric_id)
+        except Exception as err:
+            _LOGGER.debug("ServiceContext fetch failed: %s", err)
+        try:
+            voltage = await self.api.get_grid_status(numeric_id)
+        except Exception as err:
+            _LOGGER.debug("GridStatus fetch failed: %s", err)
+        return self.api.combine_grid_telemetry(context, voltage)
+
+    def _apply_live_readings(self, derived: dict[str, Any], grid: dict[str, Any]) -> None:
+        """Apply state of charge, backup hours, home load, and charging."""
+        soc = grid.get("battery_soc_percent")
+        if soc is not None:
+            derived["battery_percent"] = round(float(soc), 1)
+            derived["battery_percent_source"] = "service_context"
+        else:
+            derived["battery_percent"] = None
+            derived["battery_percent_source"] = None
+
+        backup_hours = grid.get("backup_hours")
+        derived["backup_hours"] = (
+            round(float(backup_hours), 2) if backup_hours is not None else None
+        )
+
+        home_kw = grid.get("power_to_home_kw")
+        if home_kw is not None:
+            derived["current_power_watts"] = round(home_kw * 1000)
+
+        percent = derived.get("battery_percent")
+        full_soc = 99.5
+        if percent is not None and self._prev_soc is not None:
+            delta = percent - self._prev_soc
+            if delta > 0.5:
+                derived["battery_charging"] = True
+            elif delta < -0.5:
+                derived["battery_charging"] = False
+            elif percent >= full_soc:
+                derived["battery_charging"] = False
+            else:
+                derived["battery_charging"] = None
+        elif percent is not None and percent >= full_soc:
+            derived["battery_charging"] = False
+        else:
+            derived["battery_charging"] = None
+        self._prev_soc = percent
+
     async def async_poll_grid_status(self, now=None) -> None:
         """Fetch grid status between full coordinator refreshes."""
-        if self.data is None:
+        if self.data is None or not self._numeric_service_location_id:
             return
         try:
             jwt = await self.auth.async_ensure_valid_token()
             self.api.set_jwt(jwt)
-            grid = await self.api.get_grid_status(self.service_location_id)
-            self.async_set_updated_data({**self.data, "grid": grid})
+            grid = await self._async_fetch_grid(self._numeric_service_location_id)
+            derived = dict(self.data.get("derived") or {})
+            self._apply_live_readings(derived, grid)
+            self.async_set_updated_data({**self.data, "grid": grid, "derived": derived})
         except Exception as err:
             _LOGGER.debug("Fast grid poll failed: %s", err)
 

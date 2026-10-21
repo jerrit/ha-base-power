@@ -14,6 +14,10 @@ CLERK_JS_VERSION = "5"
 # Polling intervals (seconds)
 SCAN_INTERVAL_SECONDS = 300  # 5 minutes
 GRID_SCAN_INTERVAL_SECONDS = 60  # 1 minute
+# MobileGetGridStatus reports about 240 V while the grid is up.
+# 100 V is still grid. Under 50 V the feed has collapsed.
+GRID_PRESENT_VOLTS = 100.0
+GRID_COLLAPSED_VOLTS = 50.0
 
 # Battery capacity options: label → (units, kWh).
 # Base lists Core as 39.2 kWh per unit (78.4 kWh for two). The dropdown uses

@@ -117,33 +117,37 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
 - **Polling Interval**: 5 minutes
 - **Battery**: 25, 40, 50, or 80 kWh, set in the integration options. Base Core's nameplate is 39.2 kWh per unit; the integration uses 40 and 80.
-- **Battery %**: Real SoC% from `MobileGetGridStatus` 15-min time series
-- **Backup Time**: Computed as `(SoC% × capacity kWh) ÷ avg home power kW` from today's usage intervals
-- **Service Location ID**: Auto-discovered via `MobileGetAvailableLocations` — not required during setup
+- **Battery %**: `stateOfEnergyRaw` from `MobileGetServiceContext`
+- **Backup Time**: `availableBackup` hours from `MobileGetServiceContext`, at the current home load
+- **Grid voltage and outage**: `MobileGetGridStatus` and `MobileGetServiceContext`, called with the numeric service location id from the dashboard
+- **Service Location ID**: Auto-discovered via `MobileGetAvailableLocations` — not required during setup. The address id and the numeric service location id are different values.
 
 ## Check this release before trusting it
 
 Restart Home Assistant after updating. The integration keeps the already-loaded code until then.
 
-v1.11.0 changes what a few sensors do when Base sends no data. Confirm the ones below. A passing check with the grid up does not prove the outage sensor.
+Confirm the sensors below after restarting Home Assistant. A passing check with the grid up does not prove the outage sensor.
 
-- **Grid Power, grid up.** It should be **unknown**, not on. On at least two accounts `MobileGetGridStatus` returns an empty success while the house is using power, and the old sensor turned that into "grid is up." This check does not need an outage.
-- **Grid Power, during an outage.** Still needs a test. Cut grid power at the panel, leave the house on the battery, and force an update. The September test stayed **on** for 20 minutes because the call came back empty. This release removes that false **on**. The sensor can show **off** only if Base sends an outage flag. If the call stays empty, the sensor stays **unknown**.
-- **Battery Level and Battery Backup Time.** With no state of charge, these become **unknown** instead of a stuck 100% and a backup time computed from that 100%. They report again only after the dashboard backup-time value actually changes, or the grid call includes a state of charge. On this development account the backup-time field has stayed at the install-day value, so unknown is the expected result.
-- **Battery Charging while full.** Needs an account whose state of charge is really at 100%. A flat 100% should read off, not unknown. An account with no state of charge cannot confirm this.
+- **Grid Power, grid up.** It should be **on**. The integration reads the numeric service location id from the dashboard, then asks for grid voltage. On the development account that voltage was about 245 V and the outage flag was unset. The entity attribute `voltage_volts` shows the latest sample. Calling these methods with the address string still returns an empty body.
+- **Grid Power, during an outage.** Still needs a test. Cut grid power at the panel, leave the house on the battery, and force an update. The sensor turns **off** when Base sets the active-outage flag, and also when voltage falls below 50 V. The September test stayed **on** because the request used the address string and the body came back empty. A missing response stays **unknown**. The sensor does not keep the previous "grid is up" reading.
+- **Battery Level.** This reads `stateOfEnergyRaw`. The development account reported 100. The other state-of-energy field is not the percent.
+- **Battery Backup Time.** This reads `availableBackup` hours and should move as the house load changes. The dashboard value 49652 is the numeric service location id, not a backup duration.
+- **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Daily energy still comes from the 15-minute usage series.
+- **Battery Charging while full.** A flat 100% should read off. This account can confirm that once the new code is loaded.
 - **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
-- **Energy split, self-sufficiency, daily grid total.** Still unknown. `MobileGetUsageEnergy` returns an empty success for the accounts we could call, including with billing-cycle dates and an asset id. Not fixed here.
+- **Energy split, self-sufficiency, daily grid total.** Still unknown. Usage calls also need the numeric id plus an interval, and that parser is not in this change.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
-Left from the open reports, on purpose: the grid sensor does not keep the last "grid is up" reading across an empty poll, because that is what hid the September outage. A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
+A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
 
 ## Changelog
 
 ### v1.11.0
 - Capacity choices are 25, 40, 50, and 80 kWh. Base Core's published size is 39.2 kWh per unit (78.4 for two); the options use those sizes rounded.
-- Grid Power stays unknown when grid telemetry is missing, instead of reporting that the grid is up.
-- Battery Charging reports off while state of charge stays full, instead of unknown.
-- Battery Level no longer reads 100% from the first backup-time sample after a restart. The `source` attribute says whether a reading came from grid telemetry.
+- Grid voltage, outage state, battery percent, and backup hours use the numeric service location id from the dashboard. `MobileGetGridStatus` and `MobileGetServiceContext` stay empty when called with the address string.
+- Grid Power is on when the latest voltage is at least 100 V and Base has not set an outage. It is off when the outage flag is set, or when voltage is below 50 V. A missing response stays unknown.
+- Battery Level reads `stateOfEnergyRaw`. Battery Backup Time reads `availableBackup` hours. Current Power uses the live home load when service context includes it.
+- Battery Charging reports off while state of charge stays full.
 - Bill amount is read from the nested billing message some accounts return.
 - A missing usage-cycle contract is logged at debug instead of filling the error log every poll.
 - Drop `aiohttp` from manifest requirements so hassfest passes. Home Assistant already provides it.

@@ -93,10 +93,12 @@ class BasePowerBatteryConnectedSensor(BasePowerBinarySensorBase):
     @property
     def is_on(self) -> bool | None:
         """Return True if battery is connected via WiFi."""
-        if self.coordinator.data:
-            # If we have dashboard data with backup_seconds > 0, battery is connected
-            return self.coordinator.data["dashboard"].get("backup_seconds", 0) > 0
-        return None
+        if not self.coordinator.data:
+            return None
+        connected = (self.coordinator.data.get("grid") or {}).get("gateway_connected")
+        if connected is None:
+            return None
+        return bool(connected)
 
 
 class BasePowerGridStatusSensor(BasePowerBinarySensorBase):
@@ -124,6 +126,19 @@ class BasePowerGridStatusSensor(BasePowerBinarySensorBase):
         if not grid.get("available"):
             return None
         return grid.get("grid_is_up")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, float | bool]:
+        """Expose the voltage sample and outage flag used to decide is_on."""
+        if not self.coordinator.data:
+            return {}
+        grid = self.coordinator.data.get("grid") or {}
+        attributes: dict[str, float | bool] = {}
+        if grid.get("voltage_volts") is not None:
+            attributes["voltage_volts"] = round(float(grid["voltage_volts"]), 1)
+        if grid.get("is_active_outage") is not None:
+            attributes["active_outage"] = bool(grid["is_active_outage"])
+        return attributes
 
 
 class BasePowerBatteryChargingSensor(BasePowerBinarySensorBase):

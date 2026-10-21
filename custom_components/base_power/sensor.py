@@ -100,14 +100,9 @@ class BasePowerBackupHoursSensor(BasePowerSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        """Return estimated backup hours remaining."""
+        """Return backup hours reported by the service context."""
         if self.coordinator.data:
-            estimated = self.coordinator.data.get("derived", {}).get("estimated_backup_hours")
-            if estimated is not None:
-                return estimated
-            dashboard = self.coordinator.data["dashboard"]
-            if dashboard.get("backup_seconds_live"):
-                return dashboard.get("backup_hours")
+            return self.coordinator.data.get("derived", {}).get("backup_hours")
         return None
 
 
@@ -133,7 +128,7 @@ class BasePowerBatteryPercentSensor(BasePowerSensorBase):
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:
-        """Say whether the percentage came from grid telemetry or an estimate."""
+        """Say whether the percentage came from service-context telemetry."""
         if not self.coordinator.data:
             return {}
         source = self.coordinator.data.get("derived", {}).get("battery_percent_source")
