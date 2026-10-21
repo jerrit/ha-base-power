@@ -42,7 +42,7 @@
         },
         "data_description": {
           "wifi_ssid": "Select the WiFi network your battery is connected to. Signal strength is shown in parentheses.",
-          "battery_capacity": "Choose the nameplate size. Original hardware is 25 kWh or 50 kWh. Base Core is 39.2 kWh or 78.4 kWh."
+          "battery_capacity": "Original systems are 25 or 50 kWh. Base Core is 40 or 80 kWh."
         }
       }
     }

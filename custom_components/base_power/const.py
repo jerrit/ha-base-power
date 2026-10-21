@@ -15,17 +15,19 @@ CLERK_JS_VERSION = "5"
 SCAN_INTERVAL_SECONDS = 300  # 5 minutes
 GRID_SCAN_INTERVAL_SECONDS = 60  # 1 minute
 
-# Battery capacity options: label → (units, kWh). Nameplate sizes from Base Power:
-# original hardware is 25 kWh per unit; Base Core is 39.2 kWh per unit.
-BATTERY_CAPACITY_OPTIONS: dict[str, tuple[int, float]] = {
-    "25 kWh (1 unit)": (1, 25.0),
-    "39.2 kWh (1 Core)": (1, 39.2),
-    "50 kWh (2 units)": (2, 50.0),
-    "78.4 kWh (2 Core)": (2, 78.4),
+# Battery capacity options: label → (units, kWh).
+# Base lists Core as 39.2 kWh per unit (78.4 kWh for two). The dropdown uses
+# the rounded sizes, 40 and 80. Original hardware is already 25 and 50.
+BATTERY_CAPACITY_OPTIONS: dict[str, tuple[int, int]] = {
+    "25 kWh (1 unit)": (1, 25),
+    "40 kWh (1 Core)": (1, 40),
+    "50 kWh (2 units)": (2, 50),
+    "80 kWh (2 Core)": (2, 80),
 }
-# Rounded label used by the unreleased 1.10.0 build.
 _BATTERY_CAPACITY_ALIASES = {
-    "40 kWh (1 unit)": "39.2 kWh (1 Core)",
+    "39.2 kWh (1 Core)": "40 kWh (1 Core)",
+    "40 kWh (1 unit)": "40 kWh (1 Core)",
+    "78.4 kWh (2 Core)": "80 kWh (2 Core)",
 }
 DEFAULT_BATTERY_CAPACITY = "25 kWh (1 unit)"
 # Legacy fallback for installs that still store an integer unit count.
@@ -43,7 +45,7 @@ def canonical_battery_capacity(label: str | None) -> str | None:
     return None
 
 
-def resolve_battery_capacity(label: str | None) -> tuple[int, float] | None:
+def resolve_battery_capacity(label: str | None) -> tuple[int, int] | None:
     """Return (units, kWh) for a saved capacity label."""
     canonical = canonical_battery_capacity(label)
     if canonical is None:
