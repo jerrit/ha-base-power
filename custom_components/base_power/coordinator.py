@@ -50,7 +50,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._max_backup_seconds: int = 0  # Track max for % calibration
         self._backup_seconds_varied = False
         self._prev_soc: float | None = None
-        self._last_wifi_ssid: str | None = None
         self._last_energy: dict[str, Any] = {
             "grid_to_home_kwh": None,
             "solar_to_home_kwh": None,
@@ -91,23 +90,15 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 wifi = await self.api.get_wifi_metrics(self.service_location_id)
                 scan: dict[str, int | None] = wifi.get("scan", {})
-                preferred_ssid: str | None = self._config_entry.options.get(CONF_WIFI_SSID)
+                preferred_ssid: str | None = self._config_entry.options.get(CONF_WIFI_SSID) or None
                 if preferred_ssid and preferred_ssid in scan:
-                    # User configured a specific SSID — report its signal from the scan
                     wifi["ssid"] = preferred_ssid
                     wifi["signal"] = scan[preferred_ssid]
                     wifi["connected"] = True
-                    self._last_wifi_ssid = preferred_ssid
-                elif scan:
-                    # No preference set — use strongest visible network with sticky fallback
-                    best_ssid = max(scan, key=lambda s: scan[s] or 0)
-                    wifi["ssid"] = best_ssid
-                    wifi["signal"] = scan[best_ssid]
-                    wifi["connected"] = True
-                    if not self._last_wifi_ssid:
-                        self._last_wifi_ssid = best_ssid
-                elif self._last_wifi_ssid:
-                    wifi["ssid"] = self._last_wifi_ssid
+                elif preferred_ssid:
+                    # Keep the user's network. Do not substitute a stronger one.
+                    wifi["ssid"] = preferred_ssid
+                    wifi["connected"] = False
             except Exception as err:
                 _LOGGER.debug("WifiMetrics fetch failed: %s", err)
 

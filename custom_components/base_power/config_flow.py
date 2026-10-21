@@ -68,7 +68,7 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
             pass
 
         if scan:
-            options: list[dict[str, str]] = [{"value": "", "label": "Auto (strongest signal)"}]
+            options: list[dict[str, str]] = []
             seen: set[str] = set()
             for ssid, signal in sorted(scan.items(), key=lambda x: x[1] or 0, reverse=True):
                 label = f"{ssid} ({signal}%)" if signal is not None else ssid
@@ -80,8 +80,14 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
             ssid_field = SelectSelector(
                 SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
             )
+            wifi_key = (
+                vol.Required(CONF_WIFI_SSID, default=current_ssid)
+                if current_ssid
+                else vol.Required(CONF_WIFI_SSID)
+            )
         else:
             ssid_field = str  # type: ignore[assignment]
+            wifi_key = vol.Optional(CONF_WIFI_SSID, default=current_ssid)
 
         capacity_field = SelectSelector(
             SelectSelectorConfig(
@@ -97,7 +103,7 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(CONF_WIFI_SSID, default=current_ssid): ssid_field,
+                    wifi_key: ssid_field,
                     vol.Optional(CONF_BATTERY_CAPACITY, default=current_capacity): capacity_field,
                 }
             ),

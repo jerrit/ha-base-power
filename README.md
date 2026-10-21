@@ -28,7 +28,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Status** — Operating state (Installed, In Service, etc.)
 - **Battery Charging** — Whether the battery is currently charging or discharging
 - **Solar Status** — Whether solar panels are connected
-- **WiFi Diagnostics** — Signal strength and SSID of the battery's WiFi connection
+- **WiFi Diagnostics** — Signal strength for the WiFi network you select
 - **Billing** — Current bill amount and due date
 - **Battery Connectivity** — WiFi connection status
 
@@ -135,7 +135,7 @@ v1.11.0 changes what a few sensors do when Base sends no data. Confirm the ones 
 - **Energy split, self-sufficiency, daily grid total.** Still unknown. `MobileGetUsageEnergy` returns an empty success for the accounts we could call, including with billing-cycle dates and an asset id. Not fixed here.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
-Left from the open reports, on purpose: the grid sensor does not keep the last "grid is up" reading across an empty poll, because that is what hid the September outage. A separate Shiner app API was not investigated. The Wi-Fi Network select already pins which network to track. Auto (strongest signal) is only used when no network is chosen.
+Left from the open reports, on purpose: the grid sensor does not keep the last "grid is up" reading across an empty poll, because that is what hid the September outage. A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
 
 ## Changelog
 
@@ -147,6 +147,7 @@ Left from the open reports, on purpose: the grid sensor does not keep the last "
 - Bill amount is read from the nested billing message some accounts return.
 - A missing usage-cycle contract is logged at debug instead of filling the error log every poll.
 - Drop `aiohttp` from manifest requirements so hassfest passes. Home Assistant already provides it.
+- Wi-Fi signal follows the SSID the user selects. The integration no longer substitutes the strongest network.
 
 ### v1.10.0
 - Replace the battery unit-count field with a capacity choice: 25 kWh, 40 kWh, or 50 kWh. A 40 kWh single unit is no longer stored as 25 kWh. Existing integer settings keep working until the options are saved again.

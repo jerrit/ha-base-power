@@ -41,7 +41,7 @@
           "battery_capacity": "Battery Capacity"
         },
         "data_description": {
-          "wifi_ssid": "Select the WiFi network your battery is connected to. Signal strength is shown in parentheses.",
+          "wifi_ssid": "Choose the WiFi network your battery uses. The integration tracks that network only.",
           "battery_capacity": "Original systems are 25 or 50 kWh. Base Core is 40 or 80 kWh."
         }
       }

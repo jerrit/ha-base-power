@@ -11,8 +11,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, CONF_SERVICE_LOCATION_ID, CONF_WIFI_SSID
 from .coordinator import BasePowerCoordinator
 
-_AUTO = "Auto (strongest signal)"
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -51,28 +49,26 @@ class BasePowerWifiSsidSelect(CoordinatorEntity[BasePowerCoordinator], SelectEnt
 
     @property
     def options(self) -> list[str]:
-        """Return available networks sorted by signal strength."""
+        """Return scanned networks, strongest first, plus the saved SSID."""
         scan = self._scan()
-        opts: list[str] = [_AUTO]
+        opts: list[str] = []
         for ssid in sorted(scan, key=lambda s: scan[s] or 0, reverse=True):
             opts.append(ssid)
-        # Keep the currently configured SSID in the list even if it fell off the scan
         configured = self._entry.options.get(CONF_WIFI_SSID, "")
         if configured and configured not in opts:
             opts.append(configured)
         return opts
 
     @property
-    def current_option(self) -> str:
-        """Return the currently selected option."""
+    def current_option(self) -> str | None:
+        """Return the SSID the user selected."""
         configured = self._entry.options.get(CONF_WIFI_SSID, "")
-        return configured if configured else _AUTO
+        return configured or None
 
     async def async_select_option(self, option: str) -> None:
-        """Persist the selection and trigger a coordinator refresh."""
-        ssid = "" if option == _AUTO else option
+        """Save the SSID to track and refresh."""
         self.hass.config_entries.async_update_entry(
             self._entry,
-            options={**self._entry.options, CONF_WIFI_SSID: ssid},
+            options={**self._entry.options, CONF_WIFI_SSID: option},
         )
         await self.coordinator.async_request_refresh()
