@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 import aiohttp
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth
@@ -19,6 +21,7 @@ from .const import (
     CONF_SESSION_ID,
     CONF_SESSION_JWT,
     CONF_SERVICE_LOCATION_ID,
+    GRID_SCAN_INTERVAL_SECONDS,
 )
 from .coordinator import BasePowerCoordinator
 
@@ -54,6 +57,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
     hass.data[DOMAIN][f"{entry.entry_id}_clerk_session"] = clerk_session
+
+    # Grid status every 60 seconds. The coordinator still refreshes the rest every 5 minutes.
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            coordinator.async_poll_grid_status,
+            timedelta(seconds=GRID_SCAN_INTERVAL_SECONDS),
+        )
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

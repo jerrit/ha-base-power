@@ -38,11 +38,11 @@
         "title": "Base Power Options",
         "data": {
           "wifi_ssid": "Battery WiFi Network",
-          "battery_count_override": "Number of Battery Units"
+          "battery_capacity": "Battery Capacity"
         },
         "data_description": {
           "wifi_ssid": "Select the WiFi network your battery is connected to. Signal strength is shown in parentheses.",
-          "battery_count_override": "Number of battery units installed (1 unit = 25 kWh capacity)."
+          "battery_capacity": "Select your installed battery capacity. 25 kWh and 40 kWh are single-unit systems; 50 kWh is a two-unit system."
         }
       }
     }

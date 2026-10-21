@@ -12,7 +12,15 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
-from .const import SCAN_INTERVAL_SECONDS, BATTERY_CAPACITY_PER_UNIT_KWH, DEFAULT_BATTERY_COUNT, CONF_WIFI_SSID, CONF_BATTERY_COUNT
+from .const import (
+    SCAN_INTERVAL_SECONDS,
+    BATTERY_CAPACITY_PER_UNIT_KWH,
+    DEFAULT_BATTERY_COUNT,
+    CONF_WIFI_SSID,
+    CONF_BATTERY_COUNT,
+    CONF_BATTERY_CAPACITY,
+    BATTERY_CAPACITY_OPTIONS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,8 +112,15 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 _LOGGER.debug("UsageCycles fetch failed: %s", err)
 
-            # Apply user-configured battery count (default 1; overrides API detection)
-            dashboard["battery_count"] = self._config_entry.options.get(CONF_BATTERY_COUNT, 1)
+            # Capacity dropdown wins. Older installs still store an integer unit count.
+            capacity_label = self._config_entry.options.get(CONF_BATTERY_CAPACITY)
+            if capacity_label in BATTERY_CAPACITY_OPTIONS:
+                units, kwh = BATTERY_CAPACITY_OPTIONS[capacity_label]
+            else:
+                units = self._config_entry.options.get(CONF_BATTERY_COUNT, DEFAULT_BATTERY_COUNT)
+                kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
+            dashboard["battery_count"] = units
+            dashboard["capacity_kwh"] = kwh
 
             # Derive additional values
             derived = self._derive_values(dashboard, usage)
@@ -185,13 +200,25 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             raise UpdateFailed(f"Error communicating with Base Power API: {err}") from err
 
+    async def async_poll_grid_status(self, now=None) -> None:
+        """Fetch grid status between full coordinator refreshes."""
+        if self.data is None:
+            return
+        try:
+            jwt = await self.auth.async_ensure_valid_token()
+            self.api.set_jwt(jwt)
+            grid = await self.api.get_grid_status(self.service_location_id)
+            self.async_set_updated_data({**self.data, "grid": grid})
+        except Exception as err:
+            _LOGGER.debug("Fast grid poll failed: %s", err)
+
     @staticmethod
     def _derive_values(
         dashboard: dict[str, Any], usage: list[dict[str, Any]]
     ) -> dict[str, Any]:
         """Derive additional sensor values from raw data."""
         battery_count = dashboard.get("battery_count", DEFAULT_BATTERY_COUNT)
-        capacity_kwh = battery_count * BATTERY_CAPACITY_PER_UNIT_KWH
+        capacity_kwh = dashboard.get("capacity_kwh", battery_count * BATTERY_CAPACITY_PER_UNIT_KWH)
 
         derived: dict[str, Any] = {
             "battery_percent": None,

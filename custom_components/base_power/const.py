@@ -15,9 +15,16 @@ CLERK_JS_VERSION = "5"
 SCAN_INTERVAL_SECONDS = 300  # 5 minutes
 GRID_SCAN_INTERVAL_SECONDS = 60  # 1 minute
 
-# Battery
-BATTERY_CAPACITY_PER_UNIT_KWH = 25  # Each Base Power battery is 25 kWh
-DEFAULT_BATTERY_COUNT = 1  # Fallback if API doesn't report count
+# Battery capacity options: label → (units, kWh)
+BATTERY_CAPACITY_OPTIONS: dict[str, tuple[int, int]] = {
+    "25 kWh (1 unit)": (1, 25),
+    "40 kWh (1 unit)": (1, 40),
+    "50 kWh (2 units)": (2, 50),
+}
+DEFAULT_BATTERY_CAPACITY = "25 kWh (1 unit)"
+# Legacy fallback for installs that still store an integer unit count.
+BATTERY_CAPACITY_PER_UNIT_KWH = 25
+DEFAULT_BATTERY_COUNT = 1
 
 # Config keys
 CONF_CLIENT_TOKEN = "client_token"
@@ -27,6 +34,7 @@ CONF_SERVICE_LOCATION_ID = "service_location_id"
 CONF_EMAIL = "email"
 CONF_WIFI_SSID = "wifi_ssid"
 CONF_BATTERY_COUNT = "battery_count_override"
+CONF_BATTERY_CAPACITY = "battery_capacity"
 
 # Platforms
 PLATFORMS = ["sensor", "binary_sensor", "select"]

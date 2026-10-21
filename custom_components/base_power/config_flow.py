@@ -24,6 +24,10 @@ from .const import (
     CONF_SERVICE_LOCATION_ID,
     CONF_WIFI_SSID,
     CONF_BATTERY_COUNT,
+    CONF_BATTERY_CAPACITY,
+    BATTERY_CAPACITY_OPTIONS,
+    DEFAULT_BATTERY_CAPACITY,
+    DEFAULT_BATTERY_COUNT,
 )
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth, AuthenticationError
@@ -44,7 +48,12 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(data=user_input)
 
         current_ssid = self.config_entry.options.get(CONF_WIFI_SSID, "")
-        current_count = self.config_entry.options.get(CONF_BATTERY_COUNT, 1)
+        current_capacity = self.config_entry.options.get(CONF_BATTERY_CAPACITY)
+        if current_capacity not in BATTERY_CAPACITY_OPTIONS:
+            legacy_count = self.config_entry.options.get(CONF_BATTERY_COUNT, DEFAULT_BATTERY_COUNT)
+            current_capacity = (
+                "50 kWh (2 units)" if legacy_count == 2 else DEFAULT_BATTERY_CAPACITY
+            )
 
         # Pull live WiFi scan from the running coordinator (no extra API call needed)
         scan: dict[str, int | None] = {}
@@ -71,14 +80,22 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
         else:
             ssid_field = str  # type: ignore[assignment]
 
+        capacity_field = SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    {"value": label, "label": label}
+                    for label in BATTERY_CAPACITY_OPTIONS
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_WIFI_SSID, default=current_ssid): ssid_field,
-                    vol.Optional(CONF_BATTERY_COUNT, default=current_count): vol.All(
-                        vol.Coerce(int), vol.Range(min=1, max=10)
-                    ),
+                    vol.Optional(CONF_BATTERY_CAPACITY, default=current_capacity): capacity_field,
                 }
             ),
         )
