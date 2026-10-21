@@ -13,24 +13,21 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 ## Features
 
-- **Battery Level** — Real SoC% from the GridStatus API (15-min resolution)
-- **Backup Time** — Dynamic estimate: `(SoC% × capacity kWh) ÷ avg home power kW`
+- **Battery Level** — State of charge from `stateOfEnergyRaw`, updated about once a minute
+- **Backup Time** — Hours of backup at the current home load
 - **System Capacity** — 25, 40, 50, or 80 kWh, chosen in the integration options
-- **Current Power** — Real-time power consumption (watts)
-- **Grid Power** — Current draw in amps from the latest 15-min grid reading
-- **Energy Monitoring** — 15-minute interval energy data compatible with HA Energy Dashboard
-- **Energy Breakdown** — Grid-to-home, solar-to-home, and battery-to-home energy
-- **Total Home Energy** — Combined consumption from all sources (grid + solar + battery)
-- **Self-Sufficiency** — % of home energy supplied by solar + battery vs grid
-- **Daily Statistics** — Peak, low, total, and average interval energy
-- **Daily Total (Grid)** — Total kWh from the grid status summary
-- **Grid Status** — Binary sensor for grid power availability (outage detection)
+- **Current Power** — Live home load in watts when the service context includes it
+- **Grid Power** — On when grid voltage is at least 100 V and Base has not flagged an outage. Off during an outage or when voltage falls below 50 V. Unknown when that telemetry is missing
+- **Energy Monitoring** — 15-minute interval energy from recent usage, for the Energy Dashboard
+- **Daily Statistics** — Peak, low, total, and interval count from today's usage
 - **Battery Status** — Operating state (Installed, In Service, etc.)
-- **Battery Charging** — Whether the battery is currently charging or discharging
-- **Solar Status** — Whether solar panels are connected
-- **WiFi Diagnostics** — Signal strength for the WiFi network you select
-- **Billing** — Current bill amount and due date
-- **Battery Connectivity** — WiFi connection status
+- **Battery Charging** — Off while state of charge stays full. Otherwise inferred from whether the state of charge is rising or falling
+- **Solar Status** — Whether the dashboard reports solar
+- **WiFi** — Choose the battery network. Signal strength is reported for that SSID only
+- **Battery Connectivity** — Whether the gateway is connected
+- **Billing** — Bill amount and due date when the account returns them
+
+Energy split, self-sufficiency, grid amps, and the daily grid totals stay unknown. The current grid response is a voltage series, not those summaries.
 
 ## Installation
 
@@ -61,12 +58,12 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Battery Level | State of charge | % |
-| Battery Backup Time | Hours of backup remaining | hours |
-| Battery Count | Number of battery units detected | — |
+| Battery Level | State of charge from the live service context | % |
+| Battery Backup Time | Backup remaining at the current home load | hours |
+| Battery Count | Units for the selected capacity | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
-| System Capacity | Total capacity from the selected battery size | kWh |
-| Current Power | Current power draw | W |
+| System Capacity | Capacity selected in the integration options | kWh |
+| Current Power | Live home load, or the latest 15-minute interval when live load is missing | W |
 | Current Interval Energy | Energy for current 15-min period | kWh |
 | Daily Peak | Highest 15-min interval today | kWh |
 | Daily Low | Lowest 15-min interval today | kWh |
@@ -77,18 +74,24 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 | Battery to Home Energy | Energy discharged from battery | kWh |
 | Total Home Energy | Combined home consumption (grid + solar + battery) | kWh |
 | Self-Sufficiency | % of home energy from solar + battery | % |
-| Grid Power (amps) | Current grid draw from latest 15-min reading | A |
-| Daily Total (Grid) | Total grid kWh from grid status summary | kWh |
-| Daily Average Grid Interval | Average kWh per 15-min grid interval | kWh |
+| Grid Power (amps) | Not reported by the current grid API | A |
+| Daily Total (Grid) | Not reported by the current grid API | kWh |
+| Daily Average Grid Interval | Not reported by the current grid API | kWh |
 
 ### Binary Sensors
 
 | Entity | Description |
 |--------|-------------|
-| Grid Power | Whether grid power is available (off = outage) |
+| Grid Power | Grid supply is available. Attributes show `voltage_volts` and `active_outage` |
 | Solar Connected | Whether solar panels are present |
-| Battery Connected | Battery WiFi connectivity status |
-| Battery Charging | Whether battery SoC is currently increasing |
+| Battery Connected | Gateway is connected |
+| Battery Charging | State of charge is increasing. Off while the battery stays full |
+
+### Select
+
+| Entity | Description |
+|--------|-------------|
+| WiFi Network | SSID to track. The list comes from the battery's Wi-Fi scan |
 
 ### Diagnostic Sensors
 
@@ -111,11 +114,13 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 | Battery discharge | Battery to Home Energy |
 | Home consumption | Total Home Energy |
 
+Those four sensors stay unknown until the usage-energy call returns a breakdown. Recent usage still fills Current Power, the daily totals, and the interval sensors.
+
 ## Technical Details
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
-- **Polling Interval**: 5 minutes
+- **Polling Interval**: Full refresh every 5 minutes. Grid voltage, outage state, battery percent, backup time, and current power every 60 seconds
 - **Battery**: 25, 40, 50, or 80 kWh, set in the integration options. Base Core's nameplate is 39.2 kWh per unit; the integration uses 40 and 80.
 - **Battery %**: `stateOfEnergyRaw` from `MobileGetServiceContext`
 - **Backup Time**: `availableBackup` hours from `MobileGetServiceContext`, at the current home load
@@ -128,12 +133,12 @@ Restart Home Assistant after updating. The integration keeps the already-loaded 
 
 Confirm the sensors below after restarting Home Assistant. A passing check with the grid up does not prove the outage sensor.
 
-- **Grid Power, grid up.** It should be **on**. The integration reads the numeric service location id from the dashboard, then asks for grid voltage. On the development account that voltage was about 245 V and the outage flag was unset. The entity attribute `voltage_volts` shows the latest sample. Calling these methods with the address string still returns an empty body.
+- **Grid Power, grid up.** It should be **on**, with `voltage_volts` around the normal service voltage and `active_outage` false. Confirmed on the development account at about 245 V. The integration uses the numeric service location id from the dashboard. The address string still gets an empty body from these calls.
 - **Grid Power, during an outage.** Still needs a test. Cut grid power at the panel, leave the house on the battery, and force an update. The sensor turns **off** when Base sets the active-outage flag, and also when voltage falls below 50 V. The September test stayed **on** because the request used the address string and the body came back empty. A missing response stays **unknown**. The sensor does not keep the previous "grid is up" reading.
 - **Battery Level.** This reads `stateOfEnergyRaw`. The development account reported 100. The other state-of-energy field is not the percent.
 - **Battery Backup Time.** This reads `availableBackup` hours and should move as the house load changes. The dashboard value 49652 is the numeric service location id, not a backup duration.
 - **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Daily energy still comes from the 15-minute usage series.
-- **Battery Charging while full.** A flat 100% should read off. This account can confirm that once the new code is loaded.
+- **Battery Charging while full.** A flat 100% reads off. Confirmed on the development account.
 - **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
 - **Energy split, self-sufficiency, daily grid total.** Still unknown. Usage calls also need the numeric id plus an interval, and that parser is not in this change.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
@@ -155,7 +160,7 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 
 ### v1.10.0
 - Replace the battery unit-count field with a capacity choice: 25 kWh, 40 kWh, or 50 kWh. A 40 kWh single unit is no longer stored as 25 kWh. Existing integer settings keep working until the options are saved again.
-- Poll grid status every 60 seconds so an outage does not wait for the 5-minute refresh
+- Poll grid status every 60 seconds so an outage does not wait for the 5-minute refresh. v1.11.0 uses that same poll for voltage, outage state, battery percent, backup time, and current power
 
 ### v1.9.0
 - Add **WiFi Network select entity** — a dropdown on the Base Power device card lets you choose a preferred WiFi network directly from Home Assistant, with available networks populated from a live scan sorted by signal strength
