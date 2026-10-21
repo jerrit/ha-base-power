@@ -135,7 +135,7 @@ v1.11.0 changes what a few sensors do when Base sends no data. Confirm the ones 
 - **Energy split, self-sufficiency, daily grid total.** Still unknown. `MobileGetUsageEnergy` returns an empty success for the accounts we could call, including with billing-cycle dates and an asset id. Not fixed here.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
-Left from the open reports, on purpose: the grid sensor does not keep the last "grid is up" reading across an empty poll, because that is what hid the September outage. Wi-Fi "Auto (strongest signal)" still follows the strongest network each poll. A separate Shiner app API was not investigated.
+Left from the open reports, on purpose: the grid sensor does not keep the last "grid is up" reading across an empty poll, because that is what hid the September outage. A separate Shiner app API was not investigated. The Wi-Fi Network select already pins which network to track. Auto (strongest signal) is only used when no network is chosen.
 
 ## Changelog
 
