@@ -121,6 +121,22 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 - **Backup Time**: Computed as `(SoC% × capacity kWh) ÷ avg home power kW` from today's usage intervals
 - **Service Location ID**: Auto-discovered via `MobileGetAvailableLocations` — not required during setup
 
+## Check this release before trusting it
+
+Restart Home Assistant after updating. The integration keeps the already-loaded code until then.
+
+v1.11.0 changes what a few sensors do when Base sends no data. Confirm the ones below. A passing check with the grid up does not prove the outage sensor.
+
+- **Grid Power, grid up.** It should be **unknown**, not on. On at least two accounts `MobileGetGridStatus` returns an empty success while the house is using power, and the old sensor turned that into "grid is up." This check does not need an outage.
+- **Grid Power, during an outage.** Still needs a test. Cut grid power at the panel, leave the house on the battery, and force an update. The September test stayed **on** for 20 minutes because the call came back empty. This release removes that false **on**. The sensor can show **off** only if Base sends an outage flag. If the call stays empty, the sensor stays **unknown**.
+- **Battery Level and Battery Backup Time.** With no state of charge, these become **unknown** instead of a stuck 100% and a backup time computed from that 100%. They report again only after the dashboard backup-time value actually changes, or the grid call includes a state of charge. On this development account the backup-time field has stayed at the install-day value, so unknown is the expected result.
+- **Battery Charging while full.** Needs an account whose state of charge is really at 100%. A flat 100% should read off, not unknown. An account with no state of charge cannot confirm this.
+- **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
+- **Energy split, self-sufficiency, daily grid total.** Still unknown. `MobileGetUsageEnergy` returns an empty success for the accounts we could call, including with billing-cycle dates and an asset id. Not fixed here.
+- **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
+
+Left from the open reports, on purpose: the grid sensor does not keep the last "grid is up" reading across an empty poll, because that is what hid the September outage. Wi-Fi "Auto (strongest signal)" still follows the strongest network each poll. A separate Shiner app API was not investigated.
+
 ## Changelog
 
 ### v1.11.0
