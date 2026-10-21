@@ -233,6 +233,15 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 ### Reauthentication required
 - Clerk sessions can expire. Go to the integration and click **Reconfigure** to re-authenticate.
 
+## Thanks
+
+- [@simonhogg](https://github.com/simonhogg) removed `aiohttp` from the manifest requirements and bumped the checkout action.
+- [@universal9gsm](https://github.com/universal9gsm) reported the Core battery sizes and proposed a capacity override.
+- [@yzfdave](https://github.com/yzfdave) asked for the 40 kWh Base Core option.
+- [@jabone](https://github.com/jabone) fixed the nested bill amount, the grid sensor that defaulted to on, and charging while the battery stays full.
+- [@christr](https://github.com/christr) cut power at the panel and showed that Grid Power stayed on.
+- [@Sodium-Hydrogen](https://github.com/Sodium-Hydrogen) reported the usage-cycle error on every poll.
+
 ## Contributing
 
 Contributions are welcome! Please open an issue or PR on [GitHub](https://github.com/jerrit/ha-base-power).
