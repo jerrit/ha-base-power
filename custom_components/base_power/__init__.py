@@ -58,7 +58,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = coordinator
     hass.data[DOMAIN][f"{entry.entry_id}_clerk_session"] = clerk_session
 
-    # Grid status every 60 seconds. The coordinator still refreshes the rest every 5 minutes.
+    # Live grid and battery every 60 seconds. The coordinator refresh is the
+    # 15-minute usage tier and does not repeat these two calls.
     entry.async_on_unload(
         async_track_time_interval(
             hass,

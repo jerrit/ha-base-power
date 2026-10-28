@@ -120,7 +120,7 @@ Grid to Home and Solar to Home fill from today's hourly samples. Battery to Home
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
-- **Polling Interval**: Full refresh every 5 minutes. Grid voltage, outage state, battery percent, backup time, and current power every 60 seconds
+- **Polling**: Service context and grid status every 60 seconds. Recent usage and usage energy every 15 minutes. Dashboard, Wi-Fi, billing, and usage cycles every 6 hours, and again on startup or when the numeric location id is missing. About 129 calls an hour, down from about 216
 - **Battery**: 25, 40, 50, or 80 kWh, set in the integration options. Base Core's nameplate is 39.2 kWh per unit; the integration uses 40 and 80.
 - **Battery %**: `stateOfEnergyRaw` from `MobileGetServiceContext`
 - **Backup Time**: `availableBackup` hours from `MobileGetServiceContext`, at the current home load
@@ -160,6 +160,7 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 - gRPC status is read from the trailer frame in the response body as well as from the headers.
 - Daily Average Grid Interval is today's usage total divided by the interval count.
 - Grid Power in amps is grid kilowatts times 1000 divided by voltage. Negative means export.
+- Polling is tiered: live grid every 60 seconds, usage every 15 minutes, dashboard, Wi-Fi, billing, and cycles every 6 hours. About 129 calls an hour instead of about 216.
 
 ### v1.11.0
 - Capacity choices are 25, 40, 50, and 80 kWh. Base Core's published size is 39.2 kWh per unit (78.4 for two); the options use those sizes rounded.

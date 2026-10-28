@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -21,6 +22,7 @@ from .const import (
     CONF_BATTERY_CAPACITY,
     resolve_battery_capacity,
 )
+from .poll import PollState, include_fast_on_coordinator_refresh, refresh_slow, refresh_usage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,137 +49,77 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.auth = auth
         self.service_location_id = service_location_id
         self._config_entry = config_entry
-        self._numeric_service_location_id: int | None = None
+        self._poll = PollState()
+        self._grid = self.api.combine_grid_telemetry(
+            self.api._empty_service_context(), self.api._empty_grid_voltage()
+        )
         self._prev_soc: float | None = None
-        self._last_energy: dict[str, Any] = {
-            "grid_to_home_kwh": None,
-            "solar_to_home_kwh": None,
-            "battery_to_home_kwh": None,
-        }
-        self._last_billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
-        self._last_cycles: dict[str, Any] = {"asset_id": None}
+
+    @property
+    def _numeric_service_location_id(self) -> int | None:
+        return self._poll.numeric_id
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from Base Power API."""
+        """Refresh the usage tier, and the slow tier when it is due.
+
+        ServiceContext and GridStatus are the 60-second poll. This refresh
+        does not call them again after startup.
+        """
+        first = self.data is None
         try:
-            # Refresh JWT
-            jwt = await self.auth.async_ensure_valid_token()
-            self.api.set_jwt(jwt)
-
-            # Fetch core data (required). Dashboard root is what carries the
-            # numeric service location id the usage calls need.
-            dashboard = await self.api.get_dashboard_root(self.service_location_id)
-            numeric_id = dashboard.get("service_location_id")
-            if numeric_id:
-                self._numeric_service_location_id = numeric_id
-            time_zone = getattr(getattr(self.hass, "config", None), "time_zone", None)
-            day_start, day_end = local_day_interval(time_zone)
-            _LOGGER.debug(
-                "Usage day window numeric_service_location_id=%s start=%s end=%s",
-                self._numeric_service_location_id,
-                day_start,
-                day_end,
-            )
-            usage = await self.api.get_recent_usage(self.service_location_id)
-
-            # Fetch optional data (non-fatal if they fail).
-            # An empty grid poll must stay unknown. Do not reuse an older
-            # "grid is up" reading, or an outage that stops telemetry looks fine.
-            grid = await self._async_fetch_grid(self._numeric_service_location_id)
-            wifi: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
-
-            try:
-                wifi = await self.api.get_wifi_metrics(self.service_location_id)
-                scan: dict[str, int | None] = wifi.get("scan", {})
-                preferred_ssid: str | None = self._config_entry.options.get(CONF_WIFI_SSID) or None
-                if preferred_ssid and preferred_ssid in scan:
-                    wifi["ssid"] = preferred_ssid
-                    wifi["signal"] = scan[preferred_ssid]
-                    wifi["connected"] = True
-                elif preferred_ssid:
-                    # Keep the user's network. Do not substitute a stronger one.
-                    wifi["ssid"] = preferred_ssid
-                    wifi["connected"] = False
-            except Exception as err:
-                _LOGGER.debug("WifiMetrics fetch failed: %s", err)
-
-            try:
-                fetched_energy = await self.api.get_usage_energy(
+            await self._async_ensure_jwt()
+            now = self._monotonic()
+            tiers = self._poll.tiers_for_periodic_refresh(now, first=first)
+            _LOGGER.debug("Coordinator tiers=%s", ",".join(tiers))
+            if "slow" in tiers:
+                await self._async_refresh_slow(now)
+            if "usage" in tiers:
+                await refresh_usage(
+                    self.api,
+                    self._poll,
                     self.service_location_id,
-                    numeric_service_location_id=self._numeric_service_location_id,
-                    time_zone=time_zone,
+                    self._time_zone(),
                 )
-                if any(value is not None for value in fetched_energy.values()):
-                    self._last_energy = fetched_energy
-            except Exception as err:
-                _LOGGER.debug("UsageEnergy fetch failed: %s", err)
-            energy = self._last_energy
-
-            try:
-                fetched_billing = await self.api.get_billing_metadata(
-                    self.service_location_id
-                )
-                if any(value is not None for value in fetched_billing.values()):
-                    self._last_billing = fetched_billing
-            except Exception as err:
-                _LOGGER.debug("BillingMetadata fetch failed: %s", err)
-            billing = self._last_billing
-
-            try:
-                fetched_cycles = await self.api.get_usage_cycles(self.service_location_id)
-                if any(value is not None for value in fetched_cycles.values()):
-                    self._last_cycles = fetched_cycles
-            except Exception as err:
-                _LOGGER.debug("UsageCycles fetch failed: %s", err)
-            cycles = self._last_cycles
-
-            # Capacity dropdown wins. Older installs still store an integer unit count.
-            resolved = resolve_battery_capacity(
-                self._config_entry.options.get(CONF_BATTERY_CAPACITY)
-            )
-            if resolved is not None:
-                units, kwh = resolved
-            else:
-                units = self._config_entry.options.get(CONF_BATTERY_COUNT, DEFAULT_BATTERY_COUNT)
-                kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
-            dashboard["battery_count"] = units
-            dashboard["capacity_kwh"] = kwh
-
-            # Derive additional values, then overlay live service-context readings.
-            derived = self._derive_values(dashboard, usage, time_zone)
-            self._apply_live_readings(derived, grid)
-
-            # Self-sufficiency and total home consumption from energy data
-            grid_kwh = energy.get("grid_to_home_kwh") or 0.0
-            solar_kwh = energy.get("solar_to_home_kwh") or 0.0
-            battery_kwh = energy.get("battery_to_home_kwh") or 0.0
-            total_home = grid_kwh + solar_kwh + battery_kwh
-            derived["total_home_kwh"] = round(total_home, 3) if total_home > 0 else None
-            if total_home > 0:
-                derived["self_sufficiency_percent"] = round(
-                    (solar_kwh + battery_kwh) / total_home * 100, 1
-                )
-            else:
-                derived["self_sufficiency_percent"] = None
-
-            # has_solar: trust API field or fall back to solar production > 0
-            if not dashboard.get("has_solar") and solar_kwh > 0:
-                dashboard["has_solar"] = True
-
-            return {
-                "dashboard": dashboard,
-                "usage": usage,
-                "grid": grid,
-                "wifi": wifi,
-                "energy": energy,
-                "billing": billing,
-                "cycles": cycles,
-                "derived": derived,
-            }
+            if include_fast_on_coordinator_refresh(first):
+                self._grid = await self._async_fetch_grid(self._poll.numeric_id)
+            return self._compose()
         except AuthenticationError as err:
             raise ConfigEntryAuthFailed from err
         except Exception as err:
-            raise UpdateFailed(f"Error communicating with Base Power API: {err}") from err
+            if first:
+                raise UpdateFailed(f"Error communicating with Base Power API: {err}") from err
+            _LOGGER.debug("Usage refresh failed; keeping cached data: %s", err)
+            return self.data
+
+    def _monotonic(self) -> float:
+        """Clock for tier spacing. Tests can replace this."""
+        return time.monotonic()
+
+    def _time_zone(self) -> str | None:
+        return getattr(getattr(self.hass, "config", None), "time_zone", None)
+
+    def _preferred_ssid(self) -> str | None:
+        return self._config_entry.options.get(CONF_WIFI_SSID) or None
+
+    async def _async_ensure_jwt(self) -> None:
+        jwt = await self.auth.async_ensure_valid_token()
+        self.api.set_jwt(jwt)
+
+    async def _async_refresh_slow(self, now: float) -> None:
+        day_start, day_end = local_day_interval(self._time_zone())
+        _LOGGER.debug(
+            "Slow tier numeric_service_location_id=%s day_start=%s day_end=%s",
+            self._poll.numeric_id,
+            day_start,
+            day_end,
+        )
+        await refresh_slow(
+            self.api,
+            self._poll,
+            self.service_location_id,
+            self._preferred_ssid(),
+            now,
+        )
 
     async def _async_fetch_grid(self, numeric_id: int | None) -> dict[str, Any]:
         """Read service context and grid voltage for the numeric location id."""
@@ -233,17 +175,69 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             derived["battery_charging"] = None
         self._prev_soc = percent
 
+    def _compose(self) -> dict[str, Any]:
+        """Build coordinator data from the cached tiers and the latest grid."""
+        dashboard = dict(self._poll.dashboard)
+        resolved = resolve_battery_capacity(
+            self._config_entry.options.get(CONF_BATTERY_CAPACITY)
+        )
+        if resolved is not None:
+            units, kwh = resolved
+        else:
+            units = self._config_entry.options.get(CONF_BATTERY_COUNT, DEFAULT_BATTERY_COUNT)
+            kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
+        dashboard["battery_count"] = units
+        dashboard["capacity_kwh"] = kwh
+
+        energy = self._poll.energy
+        usage = self._poll.usage
+        grid = self._grid
+        derived = self._derive_values(dashboard, usage, self._time_zone())
+        self._apply_live_readings(derived, grid)
+
+        grid_kwh = energy.get("grid_to_home_kwh") or 0.0
+        solar_kwh = energy.get("solar_to_home_kwh") or 0.0
+        battery_kwh = energy.get("battery_to_home_kwh") or 0.0
+        total_home = grid_kwh + solar_kwh + battery_kwh
+        derived["total_home_kwh"] = round(total_home, 3) if total_home > 0 else None
+        if total_home > 0:
+            derived["self_sufficiency_percent"] = round(
+                (solar_kwh + battery_kwh) / total_home * 100, 1
+            )
+        else:
+            derived["self_sufficiency_percent"] = None
+        if not dashboard.get("has_solar") and solar_kwh > 0:
+            dashboard["has_solar"] = True
+
+        return {
+            "dashboard": dashboard,
+            "usage": usage,
+            "grid": grid,
+            "wifi": self._poll.wifi,
+            "energy": energy,
+            "billing": self._poll.billing,
+            "cycles": self._poll.cycles,
+            "derived": derived,
+        }
+
     async def async_poll_grid_status(self, now=None) -> None:
-        """Fetch grid status between full coordinator refreshes."""
-        if self.data is None or not self._numeric_service_location_id:
+        """ServiceContext and GridStatus. This is the only periodic caller."""
+        if self.data is None:
             return
         try:
-            jwt = await self.auth.async_ensure_valid_token()
-            self.api.set_jwt(jwt)
-            grid = await self._async_fetch_grid(self._numeric_service_location_id)
-            derived = dict(self.data.get("derived") or {})
-            self._apply_live_readings(derived, grid)
-            self.async_set_updated_data({**self.data, "grid": grid, "derived": derived})
+            await self._async_ensure_jwt()
+            moment = self._monotonic()
+            if self._poll.numeric_id is None and self._poll.slow_due(moment, first=False):
+                await self._async_refresh_slow(moment)
+            if self._poll.numeric_id is None:
+                _LOGGER.debug("Fast poll skipped; numeric service location id is missing")
+                return
+            # An empty grid poll stays unknown. Do not keep the previous
+            # "grid is up" reading across a miss.
+            self._grid = await self._async_fetch_grid(self._poll.numeric_id)
+            self.async_set_updated_data(self._compose())
+        except AuthenticationError as err:
+            _LOGGER.debug("Fast grid poll auth failed: %s", err)
         except Exception as err:
             _LOGGER.debug("Fast grid poll failed: %s", err)
 
