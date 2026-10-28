@@ -62,17 +62,17 @@ def _encode_varint(value: int) -> bytes:
 def _encode_int_service_location(service_location_id: int) -> bytes:
     """Encode field 1 as the numeric service location id.
 
-    Grid status, service context, and usage take this int32. The external
-    address id is a different string and those methods ignore it.
+    Grid status, service context, and usage energy take this int32.
+    Recent usage, billing, cycles, and Wi-Fi keep the address string.
     """
     return b"\x08" + _encode_varint(service_location_id)
 
 
-def _encode_timestamp_field(field_number: int, seconds: int) -> bytes:
-    """Encode a google.protobuf.Timestamp (seconds only) as a length-delimited field."""
-    message = b"\x08" + _encode_varint(int(seconds))
-    tag = (field_number << 3) | 2
-    return _encode_varint(tag) + _encode_varint(len(message)) + message
+def _numeric_location_id(value: int | None) -> int | None:
+    """Return a positive service location id, or None when it is not usable."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def _zone(time_zone: str | None) -> ZoneInfo | datetime.tzinfo:
@@ -91,8 +91,8 @@ def local_day_interval(
 ) -> tuple[int, int]:
     """Return the local calendar day's [start, end) as Unix seconds.
 
-    Usage energy sums the window it is given. The sensors are daily, so the
-    window is local midnight through the next local midnight.
+    The usage APIs return a rolling day and ignore a requested window. Daily
+    sensors keep the samples that fall in this local day.
     """
     zone = _zone(time_zone)
     if now is None:
@@ -106,39 +106,78 @@ def local_day_interval(
     return int(start.timestamp()), int(end.timestamp())
 
 
-def build_site_payload(
-    address_id: str,
-    numeric_service_location_id: int | None,
-    interval: tuple[int, int] | None = None,
-) -> tuple[bytes, str]:
-    """Encode a site-scoped DashboardAPI request.
+def _sum_local_day(
+    samples: list[float], stamps: list[int | None], start: int, end: int
+) -> float | None:
+    """Sum samples whose timestamps fall in ``[start, end)``.
 
-    Returns ``(payload, "numeric"|"address")``.
-
-    Field 1 is the numeric service location id, the same int32 grid status
-    uses. Field 2 and field 3 are the interval start and end as
-    ``google.protobuf.Timestamp`` seconds. Usage calls ignore the external
-    address string; an empty usage or energy frame with only that string is
-    the failure these methods were seeing.
-
-    When the numeric id is not known yet, the payload stays the address
-    string in field 1 and the interval is left off. That is the previous
-    request, which still returns data for some accounts.
+    A length mismatch or a non-finite sample is malformed and returns None.
+    Zero is a real reading when at least one sample is inside the window.
     """
-    if (
-        isinstance(numeric_service_location_id, int)
-        and not isinstance(numeric_service_location_id, bool)
-        and numeric_service_location_id > 0
-    ):
-        payload = _encode_int_service_location(numeric_service_location_id)
-        if (
-            interval is not None
-            and interval[1] > interval[0] >= 0
-        ):
-            payload += _encode_timestamp_field(2, interval[0])
-            payload += _encode_timestamp_field(3, interval[1])
-        return payload, "numeric"
-    return _encode_service_location_request(address_id), "address"
+    if not samples or len(samples) != len(stamps):
+        return None
+    total = 0.0
+    seen = False
+    for sample, stamp in zip(samples, stamps):
+        if stamp is None or not math.isfinite(sample):
+            return None
+        if start <= stamp < end:
+            total += float(sample)
+            seen = True
+    if not seen:
+        return None
+    return round(total, 3)
+
+
+def summarize_recent_usage(
+    points: list[dict[str, Any]],
+    time_zone: str | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Current interval, and today's 15-minute kWh totals.
+
+    ``kwh`` on each point is already kW / 4. The daily total adds only points
+    at or after local midnight, so the trailing 24-hour series is not summed
+    whole.
+    """
+    summary: dict[str, Any] = {
+        "current_kwh": 0.0,
+        "current_power_watts": 0,
+        "daily_peak_kwh": 0.0,
+        "daily_low_kwh": 0.0,
+        "daily_total_kwh": 0.0,
+        "intervals_today": 0,
+    }
+    if not points:
+        return summary
+    latest = points[-1]
+    summary["current_kwh"] = latest.get("kwh") or 0.0
+    summary["current_power_watts"] = latest.get("watts") or 0
+    start, end = local_day_interval(time_zone, now)
+    today = [
+        point["kwh"]
+        for point in points
+        if isinstance(point.get("timestamp"), int)
+        and start <= point["timestamp"] < end
+        and isinstance(point.get("kwh"), (int, float))
+        and math.isfinite(point["kwh"])
+    ]
+    if not today:
+        return summary
+    summary["daily_peak_kwh"] = max(today)
+    summary["daily_low_kwh"] = min(today)
+    summary["daily_total_kwh"] = round(sum(today), 3)
+    summary["intervals_today"] = len(today)
+    return summary
+
+
+def _timestamp_seconds(message: bytes) -> int | None:
+    """Read google.protobuf.Timestamp.seconds. None when the message is not one."""
+    seconds: int | None = None
+    for field_num, kind, value in _iter_fields(message):
+        if field_num == 1 and kind == "varint":
+            seconds = value
+    return seconds
 
 
 def _decode_varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -260,11 +299,6 @@ def _parse_first_location_id(data: bytes) -> str | None:
     return None
 
 
-def _has_any_value(parsed: dict[str, Any]) -> bool:
-    """True when a parser found at least one reading."""
-    return any(value is not None for value in parsed.values())
-
-
 def _parse_billing_fields(data: bytes, result: dict[str, Any], *, nested: bool = False) -> None:
     """Read amount_cents and due_date from a billing message."""
     offset = 0
@@ -344,10 +378,19 @@ class BasePowerApiClient:
     async def _call(
         self, method: str, payload: bytes = b"", *, optional: bool = False
     ) -> bytes:
-        """Make a gRPC-Web API call.
+        """Make a gRPC-Web API call and return the protobuf message."""
+        data, _ok = await self._invoke(method, payload, optional=optional)
+        return data
 
-        Optional calls log a missing contract or empty frame at debug. Those
-        responses are normal for some accounts and must not fill the error log.
+    async def _invoke(
+        self, method: str, payload: bytes = b"", *, optional: bool = False
+    ) -> tuple[bytes, bool]:
+        """Call one RPC.
+
+        The bool is False when the transport works but gRPC status is not 0.
+        An empty status-0 frame is a successful call with no message.
+        Optional calls log that status at debug so a missing contract does not
+        fill the error log.
         """
         url = f"{API_HOST}/{API_SERVICE}/{method}"
         headers = {
@@ -369,11 +412,11 @@ class BasePowerApiClient:
                     grpc_status,
                     grpc_message,
                 )
-                return b""
+                return b"", False
             data = _parse_grpc_frame(response_data)
             if not data:
                 _LOGGER.debug("%s returned an empty payload", method)
-            return data
+            return data, True
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
         """Get dashboard root data, including the numeric service location id."""
@@ -381,22 +424,14 @@ class BasePowerApiClient:
         data = await self._call("MobileGetDashboardRoot", payload)
         return self._parse_dashboard_root(data)
 
-    async def get_recent_usage(
-        self,
-        service_location_id: str,
-        numeric_service_location_id: int | None = None,
-        interval: tuple[int, int] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Get recent 15-min interval usage data."""
-        return await self._fetch_parsed(
-            "MobileGetRecentUsage",
-            service_location_id,
-            numeric_service_location_id,
-            interval,
-            self._parse_recent_usage,
-            bool,
-            optional=False,
+    async def get_recent_usage(self, service_location_id: str) -> list[dict[str, Any]]:
+        """Get recent 15-min interval usage. The address string is the site id."""
+        payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetRecentUsage request using=address payload=%s", payload.hex()
         )
+        data = await self._call("MobileGetRecentUsage", payload)
+        return self._parse_recent_usage(data)
 
     async def get_grid_status(self, service_location_id: int) -> dict[str, Any]:
         """Get grid voltage samples for a numeric service location id."""
@@ -414,150 +449,80 @@ class BasePowerApiClient:
         self,
         service_location_id: str,
         numeric_service_location_id: int | None = None,
-        interval: tuple[int, int] | None = None,
+        time_zone: str | None = None,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Get energy breakdown (grid-to-home, solar-to-home kWh)."""
-        return await self._fetch_parsed(
-            "MobileGetUsageEnergy",
-            service_location_id,
-            numeric_service_location_id,
-            interval,
-            self._parse_usage_energy,
-            _has_any_value,
-            optional=True,
-        )
+        """Get today's grid and solar kWh.
 
-    async def get_billing_metadata(
-        self,
-        service_location_id: str,
-        numeric_service_location_id: int | None = None,
-        interval: tuple[int, int] | None = None,
-    ) -> dict[str, Any]:
-        """Get billing info (amount, due date)."""
-        return await self._fetch_parsed(
-            "MobileGetBillingMetadata",
-            service_location_id,
-            numeric_service_location_id,
-            interval,
-            self._parse_billing_metadata,
-            _has_any_value,
-            optional=True,
-        )
-
-    async def get_wifi_metrics(
-        self,
-        service_location_id: str,
-        numeric_service_location_id: int | None = None,
-        interval: tuple[int, int] | None = None,
-    ) -> dict[str, Any]:
-        """Get battery WiFi connectivity metrics."""
-        return await self._fetch_parsed(
-            "MobileGetWifiMetrics",
-            service_location_id,
-            numeric_service_location_id,
-            interval,
-            self._parse_wifi_metrics,
-            lambda parsed: bool(parsed.get("scan")),
-            optional=True,
-        )
-
-    async def get_usage_cycles(
-        self,
-        service_location_id: str,
-        numeric_service_location_id: int | None = None,
-        interval: tuple[int, int] | None = None,
-    ) -> dict[str, Any]:
-        """Get usage cycle dates and asset ID."""
-        return await self._fetch_parsed(
-            "MobileGetUsageCycles",
-            service_location_id,
-            numeric_service_location_id,
-            interval,
-            self._parse_usage_cycles,
-            _has_any_value,
-            optional=True,
-        )
-
-    async def _fetch_parsed(
-        self,
-        method: str,
-        address_id: str,
-        numeric_service_location_id: int | None,
-        interval: tuple[int, int] | None,
-        parse,
-        present,
-        *,
-        optional: bool,
-    ):
-        """Call a site RPC with the numeric id, then the address string.
-
-        A missing numeric id, an empty frame, or a frame the parser cannot
-        read falls back to the address-string request. The fallback is the
-        previous encoding, so a poll cannot crash or replace a working
-        reading with an empty one when the numeric id is not available yet.
+        Only this RPC takes the numeric service location id. The server
+        ignores interval fields, so the body is field 1 alone. A missing id
+        or a failed call uses the address string. An empty success does not
+        retry: that address call is empty too.
         """
-        if (
-            isinstance(numeric_service_location_id, int)
-            and not isinstance(numeric_service_location_id, bool)
-            and numeric_service_location_id > 0
-        ):
-            payload, mode = build_site_payload(
-                address_id, numeric_service_location_id, interval
-            )
-            self._log_site_request(
-                method, mode, numeric_service_location_id, interval, payload
+        numeric_id = _numeric_location_id(numeric_service_location_id)
+        if numeric_id is not None:
+            payload = _encode_int_service_location(numeric_id)
+            _LOGGER.debug(
+                "MobileGetUsageEnergy request using=numeric "
+                "numeric_service_location_id=%s payload=%s",
+                numeric_id,
+                payload.hex(),
             )
             try:
-                raw = await self._call(method, payload, optional=True)
+                raw, ok = await self._invoke(
+                    "MobileGetUsageEnergy", payload, optional=True
+                )
             except Exception as err:
                 _LOGGER.debug(
-                    "%s numeric request failed (%s); falling back to address id",
-                    method,
+                    "MobileGetUsageEnergy numeric request failed (%s); "
+                    "falling back to address id",
                     err,
                 )
-                raw = b""
-            parsed = parse(raw)
-            if present(parsed):
-                return parsed
-            start = interval[0] if interval else None
-            end = interval[1] if interval else None
-            _LOGGER.debug(
-                "%s empty with numeric service location id %s "
-                "interval_start=%s interval_end=%s; falling back to address id",
-                method,
-                numeric_service_location_id,
-                start,
-                end,
-            )
+            else:
+                if ok:
+                    return self._parse_usage_energy(raw, time_zone=time_zone, now=now)
+                _LOGGER.debug(
+                    "MobileGetUsageEnergy numeric request failed; "
+                    "falling back to address id"
+                )
         else:
             _LOGGER.debug(
-                "%s numeric service location id unavailable; falling back to address id",
-                method,
+                "MobileGetUsageEnergy numeric service location id unavailable; "
+                "falling back to address id"
             )
-        payload, mode = build_site_payload(address_id, None, None)
-        self._log_site_request(method, mode, None, None, payload)
-        raw = await self._call(method, payload, optional=optional)
-        return parse(raw)
-
-    @staticmethod
-    def _log_site_request(
-        method: str,
-        mode: str,
-        numeric_service_location_id: int | None,
-        interval: tuple[int, int] | None,
-        payload: bytes,
-    ) -> None:
-        """Log the site id and interval actually written into the request."""
+        payload = _encode_service_location_request(service_location_id)
         _LOGGER.debug(
-            "%s request using=%s numeric_service_location_id=%s "
-            "interval_start=%s interval_end=%s payload=%s",
-            method,
-            mode,
-            numeric_service_location_id,
-            interval[0] if interval else None,
-            interval[1] if interval else None,
-            payload.hex(),
+            "MobileGetUsageEnergy request using=address payload=%s", payload.hex()
         )
+        raw = await self._call("MobileGetUsageEnergy", payload, optional=True)
+        return self._parse_usage_energy(raw, time_zone=time_zone, now=now)
+
+    async def get_billing_metadata(self, service_location_id: str) -> dict[str, Any]:
+        """Get billing info. The address string is the site id."""
+        payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetBillingMetadata request using=address payload=%s", payload.hex()
+        )
+        data = await self._call("MobileGetBillingMetadata", payload, optional=True)
+        return self._parse_billing_metadata(data)
+
+    async def get_wifi_metrics(self, service_location_id: str) -> dict[str, Any]:
+        """Get battery WiFi metrics. The address string is the site id."""
+        payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetWifiMetrics request using=address payload=%s", payload.hex()
+        )
+        data = await self._call("MobileGetWifiMetrics", payload, optional=True)
+        return self._parse_wifi_metrics(data)
+
+    async def get_usage_cycles(self, service_location_id: str) -> dict[str, Any]:
+        """Get usage cycles and the asset id. The address string is the site id."""
+        payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetUsageCycles request using=address payload=%s", payload.hex()
+        )
+        data = await self._call("MobileGetUsageCycles", payload, optional=True)
+        return self._parse_usage_cycles(data)
 
     @staticmethod
     def _parse_dashboard_root(data: bytes) -> dict[str, Any]:
@@ -654,6 +619,9 @@ class BasePowerApiClient:
           0A 0D (field 1, len 13)
           0A 06 08 XX XX XX XX XX (Timestamp varint)
           15 XX XX XX XX (float32, little-endian)
+
+        The float is average kW over the 15 minutes, not kWh. Energy for the
+        interval is kW / 4. Power is kW * 1000.
         """
         points: list[dict[str, Any]] = []
         if not data:
@@ -664,27 +632,26 @@ class BasePowerApiClient:
             if data[offset] != 0x0A or data[offset + 1] != 0x0D:
                 break
 
-            # Decode timestamp varint at offset+5
             ts = 0
             shift = 0
             for i in range(5):
-                b = data[offset + 5 + i]
-                ts |= (b & 0x7F) << shift
+                byte = data[offset + 5 + i]
+                ts |= (byte & 0x7F) << shift
                 shift += 7
-                if not (b & 0x80):
+                if not (byte & 0x80):
                     break
 
-            # Decode float32 at offset+11 (little-endian)
-            kwh = struct.unpack("<f", data[offset + 11 : offset + 15])[0]
-
+            kw = struct.unpack("<f", data[offset + 11 : offset + 15])[0]
+            offset += 15
+            if not math.isfinite(kw):
+                continue
             points.append(
                 {
                     "timestamp": ts,
-                    "kwh": round(kwh, 3),
-                    "watts": round(kwh * 4000),
+                    "kwh": round(kw / 4, 3),
+                    "watts": round(kw * 1000),
                 }
             )
-            offset += 15
 
         return points
 
@@ -758,26 +725,52 @@ class BasePowerApiClient:
         return result
 
     @staticmethod
-    def _parse_usage_cycles(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetUsageCycles response for asset_id."""
-        result: dict[str, Any] = {"asset_id": None}
+    def _parse_usage_cycles(
+        data: bytes, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Parse asset id and the billing cycle that contains ``now``.
+
+        Field 1 repeats a cycle whose field 2 and field 3 are start and end
+        timestamps. Field 2 at the top level is the asset id string. Lengths
+        use varints, so an entry longer than 127 bytes still parses.
+        ``cycle_start`` is the Unix second the current cycle began, or None.
+        """
+        result: dict[str, Any] = {"asset_id": None, "cycle_start": None}
         if not data:
             return result
 
-        offset = 0
-        while offset < len(data):
-            if data[offset] == 0x12:  # field 2 (asset_id string)
-                str_len = data[offset + 1]
-                result["asset_id"] = data[offset + 2 : offset + 2 + str_len].decode(
-                    "utf-8"
-                )
-                break
-            elif data[offset] == 0x0A:  # field 1 (cycle entry), skip it
-                entry_len = data[offset + 1]
-                offset += 2 + entry_len
-            else:
-                offset += 1
+        cycles: list[tuple[int, int | None]] = []
+        for field_num, kind, value in _iter_fields(data):
+            if field_num == 2 and kind == "bytes" and result["asset_id"] is None:
+                try:
+                    text = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = ""
+                if text and text.isprintable():
+                    result["asset_id"] = text
+            elif field_num == 1 and kind == "bytes":
+                start: int | None = None
+                end: int | None = None
+                for sub_field, sub_kind, sub_value in _iter_fields(value):
+                    if sub_kind != "bytes" or sub_field not in (2, 3):
+                        continue
+                    stamp = _timestamp_seconds(sub_value)
+                    if sub_field == 2:
+                        start = stamp
+                    else:
+                        end = stamp
+                if start is not None:
+                    cycles.append((start, end))
 
+        moment = int((now or datetime.now(UTC)).timestamp())
+        current: int | None = None
+        for start, end in cycles:
+            if start <= moment and (end is None or moment < end):
+                if current is None or start >= current:
+                    current = start
+        result["cycle_start"] = current
+        if current is not None:
+            _LOGGER.debug("UsageCycles current cycle_start=%s", current)
         return result
 
     @staticmethod
@@ -957,15 +950,17 @@ class BasePowerApiClient:
         return None
 
     @staticmethod
-    def _parse_usage_energy(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetUsageEnergy response.
+    def _parse_usage_energy(
+        data: bytes, time_zone: str | None = None, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Parse MobileGetUsageEnergy.
 
-        Expected fields (float32 or double):
-          Field 1: grid_to_home_kwh
-          Field 2: solar_to_home_kwh
-          Field 3: battery_to_home_kwh
-
-        A missing field stays None. Zero is a real reading. NaN is not.
+        The body is one rolling day of hourly samples, not three totals.
+        Field 2 is packed float32 home/grid kWh. Field 4 is packed float32
+        solar kWh. Field 5 repeats the hour start as a Timestamp. Samples at
+        or after local midnight, and before the next one, are summed. Battery
+        energy is not in this message. A missing or mismatched series stays
+        None. A summed zero is kept.
         """
         result: dict[str, Any] = {
             "grid_to_home_kwh": None,
@@ -976,20 +971,39 @@ class BasePowerApiClient:
             return result
 
         _LOGGER.debug("UsageEnergy raw hex: %s", data.hex())
-        keys = {
-            1: "grid_to_home_kwh",
-            2: "solar_to_home_kwh",
-            3: "battery_to_home_kwh",
-        }
+        grid: list[float] = []
+        solar: list[float] | None = None
+        stamps: list[int | None] = []
+        solar_seen = False
         for field_num, kind, value in _iter_fields(data):
-            key = keys.get(field_num)
-            if key is None or kind not in ("float", "double"):
-                continue
-            if not math.isfinite(value):
-                continue
-            result[key] = round(value, 3)
+            if field_num == 2 and kind == "bytes":
+                grid.extend(_packed_floats(value))
+            elif field_num == 2 and kind == "float":
+                grid.append(value)
+            elif field_num == 4 and kind == "bytes":
+                solar_seen = True
+                if solar is None:
+                    solar = []
+                solar.extend(_packed_floats(value))
+            elif field_num == 4 and kind == "float":
+                solar_seen = True
+                if solar is None:
+                    solar = []
+                solar.append(value)
+            elif field_num == 5 and kind == "bytes":
+                stamps.append(_timestamp_seconds(value))
 
-        _LOGGER.debug("UsageEnergy parsed: %s", result)
+        start, end = local_day_interval(time_zone, now)
+        result["grid_to_home_kwh"] = _sum_local_day(grid, stamps, start, end)
+        if solar_seen:
+            result["solar_to_home_kwh"] = _sum_local_day(solar or [], stamps, start, end)
+        _LOGGER.debug(
+            "UsageEnergy parsed: %s hours=%s day_start=%s day_end=%s",
+            result,
+            len(stamps),
+            start,
+            end,
+        )
         return result
 
     @staticmethod

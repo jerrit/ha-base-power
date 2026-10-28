@@ -27,7 +27,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Connectivity** — Whether the gateway is connected
 - **Billing** — Bill amount and due date when the account returns them
 
-Energy split and self-sufficiency request the numeric service location id and the local calendar day. They stay unknown until that call returns a breakdown. Grid amps and the daily grid totals stay unknown: grid status is a voltage series, not those summaries.
+Grid to Home and Solar to Home sum today's hourly samples from `MobileGetUsageEnergy`. That call uses the numeric service location id. Battery to Home stays unknown. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps and the daily grid totals stay unknown: grid status is a voltage series.
 
 ## Installation
 
@@ -63,11 +63,11 @@ Energy split and self-sufficiency request the numeric service location id and th
 | Battery Count | Units for the selected capacity | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
 | System Capacity | Capacity selected in the integration options | kWh |
-| Current Power | Live home load, or the latest 15-minute interval when live load is missing | W |
-| Current Interval Energy | Energy for current 15-min period | kWh |
+| Current Power | Live home load, or the latest 15-minute average kW when live load is missing | W |
+| Current Interval Energy | Energy for the current 15-min period (average kW ÷ 4) | kWh |
 | Daily Peak | Highest 15-min interval today | kWh |
 | Daily Low | Lowest 15-min interval today | kWh |
-| Daily Total Energy | Cumulative energy today | kWh |
+| Daily Total Energy | Today's 15-min intervals only, each average kW ÷ 4 | kWh |
 | Intervals Today | Number of data intervals today | — |
 | Grid to Home Energy | Energy drawn from grid | kWh |
 | Solar to Home Energy | Energy from solar panels | kWh |
@@ -114,7 +114,7 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 | Battery discharge | Battery to Home Energy |
 | Home consumption | Total Home Energy |
 
-Those four sensors stay unknown until the usage-energy call returns a breakdown. The request sends the numeric service location id from the dashboard and the local calendar day as a start and end timestamp. Recent usage still fills Current Power, the daily totals, and the interval sensors.
+Grid to Home and Solar to Home fill from today's hourly samples. Battery to Home stays unknown. Recent usage fills Current Power, the daily totals, and the interval sensors. Daily totals count local-midnight onward, not the whole trailing 24 hours.
 
 ## Technical Details
 
@@ -137,10 +137,12 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Grid Power, during an outage.** Still needs a test. Cut grid power at the panel, leave the house on the battery, and force an update. The sensor turns **off** when Base sets the active-outage flag, and also when voltage falls below 50 V. The September test stayed **on** because the request used the address string and the body came back empty. A missing response stays **unknown**. The sensor does not keep the previous "grid is up" reading.
 - **Battery Level.** This reads `stateOfEnergyRaw`. The development account reported 100. The other state-of-energy field is not the percent.
 - **Battery Backup Time.** This reads `availableBackup` hours and should move as the house load changes. The dashboard value 49652 is the numeric service location id, not a backup duration.
-- **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Daily energy still comes from the 15-minute usage series.
+- **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Otherwise the latest 15-minute sample is average kW, and watts are that value times 1000.
 - **Battery Charging while full.** A flat 100% reads off. Confirmed on the development account.
 - **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
-- **Energy split, self-sufficiency, daily grid total.** Usage calls now send the numeric service location id and the local calendar day. Confirm `UsageEnergy parsed` shows grid, solar, and battery kWh. Daily grid total and grid amps stay unknown: the grid response is still a voltage series. A missing breakdown stays unknown.
+- **Grid to Home and Solar to Home.** `MobileGetUsageEnergy` uses the numeric service location id and no time fields. `UsageEnergy parsed` should show today's summed grid and solar kWh. Battery to Home stays unknown. A missing series stays unknown.
+- **Daily Total Energy.** It sums 15-minute samples from local midnight onward. Each sample is average kW divided by 4. The previous 24-hour sum was about four times too large.
+- **Daily grid total and grid amps.** Still unknown. Grid status is a voltage series.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
@@ -148,7 +150,9 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 ## Changelog
 
 ### Unreleased
-- Recent usage, usage energy, billing, usage cycles, and Wi-Fi send the numeric service location id and the local calendar day. A missing id, or an empty reply, falls back to the address string. Empty replies stay unknown.
+- `MobileGetUsageEnergy` sends only the numeric service location id. The other usage, billing, cycle, and Wi-Fi calls keep the address string. The energy reply is an hourly series; today's grid and solar hours are summed. Battery energy stays unknown.
+- Recent usage samples are average kW. Interval energy is that value divided by 4, watts are the value times 1000, and the daily total includes only the local day.
+- Clerk session ids are not written to the log in full.
 
 ### v1.11.0
 - Capacity choices are 25, 40, 50, and 80 kWh. Base Core's published size is 39.2 kWh per unit (78.4 for two); the options use those sizes rounded.

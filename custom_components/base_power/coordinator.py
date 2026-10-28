@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from .api import BasePowerApiClient, local_day_interval
+from .api import BasePowerApiClient, local_day_interval, summarize_recent_usage
 from .auth import BasePowerAuth, AuthenticationError
 from .const import (
     SCAN_INTERVAL_SECONDS,
@@ -71,18 +71,14 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if numeric_id:
                 self._numeric_service_location_id = numeric_id
             time_zone = getattr(getattr(self.hass, "config", None), "time_zone", None)
-            interval = local_day_interval(time_zone)
+            day_start, day_end = local_day_interval(time_zone)
             _LOGGER.debug(
-                "Site window numeric_service_location_id=%s interval_start=%s interval_end=%s",
+                "Usage day window numeric_service_location_id=%s start=%s end=%s",
                 self._numeric_service_location_id,
-                interval[0],
-                interval[1],
+                day_start,
+                day_end,
             )
-            usage = await self.api.get_recent_usage(
-                self.service_location_id,
-                numeric_service_location_id=self._numeric_service_location_id,
-                interval=interval,
-            )
+            usage = await self.api.get_recent_usage(self.service_location_id)
 
             # Fetch optional data (non-fatal if they fail).
             # An empty grid poll must stay unknown. Do not reuse an older
@@ -91,11 +87,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             wifi: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
 
             try:
-                wifi = await self.api.get_wifi_metrics(
-                    self.service_location_id,
-                    numeric_service_location_id=self._numeric_service_location_id,
-                    interval=interval,
-                )
+                wifi = await self.api.get_wifi_metrics(self.service_location_id)
                 scan: dict[str, int | None] = wifi.get("scan", {})
                 preferred_ssid: str | None = self._config_entry.options.get(CONF_WIFI_SSID) or None
                 if preferred_ssid and preferred_ssid in scan:
@@ -113,7 +105,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 fetched_energy = await self.api.get_usage_energy(
                     self.service_location_id,
                     numeric_service_location_id=self._numeric_service_location_id,
-                    interval=interval,
+                    time_zone=time_zone,
                 )
                 if any(value is not None for value in fetched_energy.values()):
                     self._last_energy = fetched_energy
@@ -123,9 +115,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             try:
                 fetched_billing = await self.api.get_billing_metadata(
-                    self.service_location_id,
-                    numeric_service_location_id=self._numeric_service_location_id,
-                    interval=interval,
+                    self.service_location_id
                 )
                 if any(value is not None for value in fetched_billing.values()):
                     self._last_billing = fetched_billing
@@ -134,11 +124,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             billing = self._last_billing
 
             try:
-                fetched_cycles = await self.api.get_usage_cycles(
-                    self.service_location_id,
-                    numeric_service_location_id=self._numeric_service_location_id,
-                    interval=interval,
-                )
+                fetched_cycles = await self.api.get_usage_cycles(self.service_location_id)
                 if any(value is not None for value in fetched_cycles.values()):
                     self._last_cycles = fetched_cycles
             except Exception as err:
@@ -158,7 +144,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dashboard["capacity_kwh"] = kwh
 
             # Derive additional values, then overlay live service-context readings.
-            derived = self._derive_values(dashboard, usage)
+            derived = self._derive_values(dashboard, usage, time_zone)
             self._apply_live_readings(derived, grid)
 
             # Self-sufficiency and total home consumption from energy data
@@ -263,7 +249,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @staticmethod
     def _derive_values(
-        dashboard: dict[str, Any], usage: list[dict[str, Any]]
+        dashboard: dict[str, Any],
+        usage: list[dict[str, Any]],
+        time_zone: str | None = None,
     ) -> dict[str, Any]:
         """Derive additional sensor values from raw data."""
         battery_count = dashboard.get("battery_count", DEFAULT_BATTERY_COUNT)
@@ -273,22 +261,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_percent": None,
             "battery_count": battery_count,
             "capacity_kwh": capacity_kwh,
-            "current_power_watts": 0,
-            "current_kwh": 0.0,
-            "daily_peak_kwh": 0.0,
-            "daily_low_kwh": 0.0,
-            "daily_total_kwh": 0.0,
-            "intervals_today": 0,
         }
-
-        # Usage-derived values
-        if usage:
-            values = [p["kwh"] for p in usage]
-            derived["current_kwh"] = values[-1]
-            derived["current_power_watts"] = round(values[-1] * 4000)
-            derived["daily_peak_kwh"] = max(values)
-            derived["daily_low_kwh"] = min(values)
-            derived["daily_total_kwh"] = round(sum(values), 2)
-            derived["intervals_today"] = len(values)
-
+        derived.update(summarize_recent_usage(usage, time_zone))
         return derived

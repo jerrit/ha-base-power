@@ -1,7 +1,7 @@
-"""Request bytes for the five site RPCs that were returning empty frames.
+"""Request bytes and parsers checked against a live Base Power account.
 
-The integration package imports Home Assistant. These tests load the API
-module directly so the request encoding can be checked without it.
+Fixtures are synthetic. They follow the observed field layout and do not
+contain a real address, account id, or captured payload.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import logging
 import struct
 import sys
 import types
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -20,8 +20,18 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PKG = "custom_components.base_power"
 
 
+def _load(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(
+        name, _ROOT / "custom_components" / "base_power" / filename
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_api():
-    """Import api.py without executing the integration's Home Assistant setup."""
     if _PKG + ".api" in sys.modules:
         return sys.modules[_PKG + ".api"]
     components = types.ModuleType("custom_components")
@@ -31,45 +41,25 @@ def _load_api():
     package.__package__ = _PKG
     sys.modules["custom_components"] = components
     sys.modules[_PKG] = package
-
-    def load(name: str, filename: str):
-        spec = importlib.util.spec_from_file_location(
-            name, _ROOT / "custom_components" / "base_power" / filename
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        return module
-
-    load(_PKG + ".const", "const.py")
-    return load(_PKG + ".api", "api.py")
+    _load(_PKG + ".const", "const.py")
+    return _load(_PKG + ".api", "api.py")
 
 
 _api = _load_api()
+_auth = _load(_PKG + ".auth", "auth.py")
 BasePowerApiClient = _api.BasePowerApiClient
-build_site_payload = _api.build_site_payload
 local_day_interval = _api.local_day_interval
+summarize_recent_usage = _api.summarize_recent_usage
 
 ADDRESS = "loc-1"
 ADDRESS_BYTES = bytes.fromhex("0a056c6f632d31")
-# Field 1 varint 150, field 2 timestamp seconds=1, field 3 timestamp seconds=2.
-NUMERIC_INTERVAL = bytes.fromhex("089601120208011a020802")
-INTERVAL = (1, 2)
-
-RECENT_OK = bytes.fromhex("0a0d" + "00" * 13)
-ENERGY_OK = bytes.fromhex("0d0000803f")  # field 1 float32 = 1.0
-BILLING_OK = bytes.fromhex("1064")  # field 2 varint = 100 cents
-WIFI_OK = bytes.fromhex("0a030a0178")  # field 1 {ssid "x"}
-CYCLES_OK = bytes.fromhex("120161")  # field 2 string "a"
-
-RPCS = (
-    ("get_recent_usage", "MobileGetRecentUsage", RECENT_OK, False),
-    ("get_usage_energy", "MobileGetUsageEnergy", ENERGY_OK, True),
-    ("get_billing_metadata", "MobileGetBillingMetadata", BILLING_OK, True),
-    ("get_wifi_metrics", "MobileGetWifiMetrics", WIFI_OK, True),
-    ("get_usage_cycles", "MobileGetUsageCycles", CYCLES_OK, True),
-)
+NUMERIC_BYTES = bytes.fromhex("089601")  # field 1 varint 150, nothing else
+ZONE = "America/Chicago"
+# 2026-10-28 12:00 in Chicago is after local midnight (05:00 UTC).
+NOW = datetime(2026, 10, 28, 12, 0, tzinfo=ZoneInfo(ZONE))
+HOUR_BEFORE = int(datetime(2026, 10, 28, 4, 0, tzinfo=UTC).timestamp())
+HOUR_MIDNIGHT = int(datetime(2026, 10, 28, 5, 0, tzinfo=UTC).timestamp())
+HOUR_LATER = int(datetime(2026, 10, 28, 6, 0, tzinfo=UTC).timestamp())
 
 
 class RecordingClient(BasePowerApiClient):
@@ -80,149 +70,233 @@ class RecordingClient(BasePowerApiClient):
         self._responses = list(responses)
         self.calls: list[tuple[str, bytes, bool]] = []
 
-    async def _call(self, method: str, payload: bytes = b"", *, optional: bool = False) -> bytes:
+    async def _invoke(self, method: str, payload: bytes = b"", *, optional: bool = False):
         self.calls.append((method, bytes(payload), optional))
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
-        return item
+        if isinstance(item, tuple):
+            return item
+        return item, True
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-def test_numeric_interval_bytes_are_stable():
-    """Lock the protobuf layout: int32 id, then two timestamp messages."""
-    payload, mode = build_site_payload(ADDRESS, 150, INTERVAL)
-    assert mode == "numeric"
-    assert payload == NUMERIC_INTERVAL
+def _len_field(field_number: int, payload: bytes) -> bytes:
+    tag = (field_number << 3) | 2
+    return _api._encode_varint(tag) + _api._encode_varint(len(payload)) + payload
 
 
-def test_address_fallback_omits_the_interval():
-    """The previous request is field 1 as the address string and nothing else."""
-    for numeric in (None, 0, False):
-        payload, mode = build_site_payload(ADDRESS, numeric, INTERVAL)
-        assert mode == "address"
-        assert payload == ADDRESS_BYTES
+def _timestamp(field_number: int, seconds: int) -> bytes:
+    return _len_field(field_number, b"\x08" + _api._encode_varint(seconds))
 
 
-def test_inverted_interval_sends_the_id_only():
-    payload, mode = build_site_payload(ADDRESS, 150, (5, 5))
-    assert mode == "numeric"
-    assert payload == bytes.fromhex("089601")
+def _packed(field_number: int, values: list[float]) -> bytes:
+    return _len_field(field_number, b"".join(struct.pack("<f", value) for value in values))
 
 
-def test_local_day_interval_uses_the_zone_and_does_not_crash():
-    zone = ZoneInfo("America/Chicago")
-    now = datetime(2026, 10, 28, 15, 30, tzinfo=zone)
-    start, end = local_day_interval("America/Chicago", now)
-    assert datetime.fromtimestamp(start, zone) == datetime(2026, 10, 28, tzinfo=zone)
-    assert datetime.fromtimestamp(end, zone) == datetime(2026, 10, 29, tzinfo=zone)
-    assert end - start == 86400
-
-    start, end = local_day_interval("Not/AZone", datetime(2026, 1, 2, 3, tzinfo=ZoneInfo("UTC")))
-    assert datetime.fromtimestamp(start, ZoneInfo("UTC")) == datetime(2026, 1, 2, tzinfo=ZoneInfo("UTC"))
-    assert end - start == 86400
+def _recent_point(timestamp: int, kw: float) -> bytes:
+    encoded = _api._encode_varint(timestamp)
+    assert len(encoded) == 5
+    body = b"\x0a\x06\x08" + encoded + b"\x15" + struct.pack("<f", kw)
+    assert len(body) == 13
+    return b"\x0a\x0d" + body
 
 
-def test_each_rpc_sends_numeric_id_and_interval():
-    async def check(method_name: str, rpc: str, body: bytes, optional: bool) -> None:
-        client = RecordingClient([body])
-        result = await getattr(client, method_name)(ADDRESS, 150, INTERVAL)
-        assert client.calls == [(rpc, NUMERIC_INTERVAL, True)]
-        assert result
-
-    for method_name, rpc, body, optional in RPCS:
-        _run(check(method_name, rpc, body, optional))
+def _energy_body(grid: list[float], solar: list[float], stamps: list[int]) -> bytes:
+    parts = [b"\x18\x01"]  # field 3 varint, ignored
+    parts.append(_len_field(1, b"2026-01-01 00:00:00"))
+    parts.append(_packed(2, grid))
+    parts.append(_packed(4, solar))
+    parts.extend(_timestamp(5, stamp) for stamp in stamps)
+    return b"".join(parts)
 
 
-def test_each_rpc_falls_back_when_numeric_id_is_missing(caplog):
-    caplog.set_level(logging.DEBUG, logger="custom_components.base_power.api")
+def test_usage_energy_sends_only_the_numeric_id():
+    body = _energy_body([1.5, 2.5], [0.0, 0.0], [HOUR_MIDNIGHT, HOUR_LATER])
 
-    async def check(method_name: str, rpc: str, body: bytes, optional: bool) -> None:
-        client = RecordingClient([body])
-        result = await getattr(client, method_name)(ADDRESS, None, INTERVAL)
-        assert client.calls == [(rpc, ADDRESS_BYTES, optional)]
-        assert result
-
-    for method_name, rpc, body, optional in RPCS:
-        _run(check(method_name, rpc, body, optional))
-    assert "numeric service location id unavailable; falling back to address id" in caplog.text
-
-
-def test_each_rpc_falls_back_when_numeric_frame_is_empty():
-    async def check(method_name: str, rpc: str, body: bytes, optional: bool) -> None:
-        client = RecordingClient([b"", body])
-        result = await getattr(client, method_name)(ADDRESS, 150, INTERVAL)
-        assert [call[0] for call in client.calls] == [rpc, rpc]
-        assert client.calls[0][1] == NUMERIC_INTERVAL
-        assert client.calls[0][2] is True
-        assert client.calls[1] == (rpc, ADDRESS_BYTES, optional)
-        assert result
-
-    for method_name, rpc, body, optional in RPCS:
-        _run(check(method_name, rpc, body, optional))
-
-
-def test_numeric_transport_error_falls_back_instead_of_raising():
     async def check() -> None:
-        client = RecordingClient([ConnectionError("down"), CYCLES_OK])
-        result = await client.get_usage_cycles(ADDRESS, 150, INTERVAL)
-        assert result["asset_id"] == "a"
-        assert client.calls[1][1] == ADDRESS_BYTES
+        client = RecordingClient([body])
+        parsed = await client.get_usage_energy(ADDRESS, 150, ZONE, NOW)
+        assert client.calls == [("MobileGetUsageEnergy", NUMERIC_BYTES, True)]
+        assert parsed["grid_to_home_kwh"] == 4.0
+        assert parsed["solar_to_home_kwh"] == 0.0
+        assert parsed["battery_to_home_kwh"] is None
 
     _run(check())
 
 
-def test_usage_energy_reads_doubles_and_keeps_zero():
-    payload = b"".join(
-        bytes([((index + 1) << 3) | 1]) + struct.pack("<d", value)
-        for index, value in enumerate((1.5, 0.0, 2.25))
+def test_other_rpcs_send_the_address_string_once():
+    recent = _recent_point(HOUR_LATER, 1.0)
+    cases = (
+        ("get_recent_usage", "MobileGetRecentUsage", recent, False),
+        ("get_billing_metadata", "MobileGetBillingMetadata", b"\x10\x64", True),
+        ("get_wifi_metrics", "MobileGetWifiMetrics", bytes.fromhex("0a030a0178"), True),
+        ("get_usage_cycles", "MobileGetUsageCycles", b"\x12\x07asset-1", True),
     )
-    parsed = BasePowerApiClient._parse_usage_energy(payload)
-    assert parsed == {
-        "grid_to_home_kwh": 1.5,
-        "solar_to_home_kwh": 0.0,
-        "battery_to_home_kwh": 2.25,
-    }
 
-    only_nan = bytes([0x09]) + struct.pack("<d", float("nan"))
-    assert BasePowerApiClient._parse_usage_energy(only_nan) == {
+    async def check(method_name: str, rpc: str, body: bytes, optional: bool) -> None:
+        client = RecordingClient([body])
+        await getattr(client, method_name)(ADDRESS)
+        assert client.calls == [(rpc, ADDRESS_BYTES, optional)]
+
+    for method_name, rpc, body, optional in cases:
+        _run(check(method_name, rpc, body, optional))
+
+
+def test_usage_energy_falls_back_when_numeric_id_is_missing(caplog):
+    caplog.set_level(logging.DEBUG, logger="custom_components.base_power.api")
+    body = _energy_body([1.0], [0.0], [HOUR_LATER])
+
+    async def check(numeric) -> None:
+        client = RecordingClient([body])
+        parsed = await client.get_usage_energy(ADDRESS, numeric, ZONE, NOW)
+        assert client.calls == [("MobileGetUsageEnergy", ADDRESS_BYTES, True)]
+        assert parsed["grid_to_home_kwh"] == 1.0
+
+    for numeric in (None, 0, False):
+        _run(check(numeric))
+    assert "numeric service location id unavailable; falling back to address id" in caplog.text
+
+
+def test_usage_energy_falls_back_when_the_numeric_call_fails():
+    body = _energy_body([2.0], [0.0], [HOUR_LATER])
+
+    async def failed_status() -> None:
+        client = RecordingClient([(b"", False), body])
+        parsed = await client.get_usage_energy(ADDRESS, 150, ZONE, NOW)
+        assert [call[1] for call in client.calls] == [NUMERIC_BYTES, ADDRESS_BYTES]
+        assert parsed["grid_to_home_kwh"] == 2.0
+
+    async def raised() -> None:
+        client = RecordingClient([ConnectionError("down"), body])
+        parsed = await client.get_usage_energy(ADDRESS, 150, ZONE, NOW)
+        assert client.calls[1][1] == ADDRESS_BYTES
+        assert parsed["grid_to_home_kwh"] == 2.0
+
+    _run(failed_status())
+    _run(raised())
+
+
+def test_empty_numeric_success_does_not_retry():
+    async def check() -> None:
+        client = RecordingClient([(b"", True)])
+        parsed = await client.get_usage_energy(ADDRESS, 150, ZONE, NOW)
+        assert len(client.calls) == 1
+        assert parsed == {
+            "grid_to_home_kwh": None,
+            "solar_to_home_kwh": None,
+            "battery_to_home_kwh": None,
+        }
+
+    _run(check())
+
+
+def test_usage_energy_sums_only_the_local_day_and_keeps_zero():
+    body = _energy_body(
+        [9.0, 1.5, 0.0],
+        [4.0, 0.0, 0.0],
+        [HOUR_BEFORE, HOUR_MIDNIGHT, HOUR_LATER],
+    )
+    parsed = BasePowerApiClient._parse_usage_energy(body, ZONE, NOW)
+    assert parsed["grid_to_home_kwh"] == 1.5
+    assert parsed["solar_to_home_kwh"] == 0.0
+    assert parsed["battery_to_home_kwh"] is None
+
+    async def no_fallback() -> None:
+        client = RecordingClient([body])
+        await client.get_usage_energy(ADDRESS, 150, ZONE, NOW)
+        assert len(client.calls) == 1
+
+    _run(no_fallback())
+
+
+def test_usage_energy_malformed_stays_none():
+    mismatched = _packed(2, [1.0]) + _timestamp(5, HOUR_LATER) + _timestamp(5, HOUR_MIDNIGHT)
+    parsed = BasePowerApiClient._parse_usage_energy(mismatched, ZONE, NOW)
+    assert parsed == {
         "grid_to_home_kwh": None,
         "solar_to_home_kwh": None,
         "battery_to_home_kwh": None,
     }
-    assert BasePowerApiClient._parse_usage_energy(b"")["grid_to_home_kwh"] is None
+
+    nan = _packed(2, [float("nan")]) + _timestamp(5, HOUR_LATER)
+    assert BasePowerApiClient._parse_usage_energy(nan, ZONE, NOW)["grid_to_home_kwh"] is None
+    assert BasePowerApiClient._parse_usage_energy(b"", ZONE, NOW)["grid_to_home_kwh"] is None
 
 
-def test_zero_grid_energy_is_data_and_does_not_fall_back():
-    """A real zero must not be replaced by the address-string response."""
-    zero = bytes.fromhex("0d00000000")  # field 1 float32 = 0
-
-    async def check() -> None:
-        client = RecordingClient([zero, ENERGY_OK])
-        parsed = await client.get_usage_energy(ADDRESS, 150, INTERVAL)
-        assert len(client.calls) == 1
-        assert parsed["grid_to_home_kwh"] == 0.0
-        assert parsed["solar_to_home_kwh"] is None
-
-    _run(check())
+def test_billing_empty_submessages_stay_none():
+    parsed = BasePowerApiClient._parse_billing_metadata(bytes.fromhex("0a001200"))
+    assert parsed == {"amount_cents": None, "due_date": None}
 
 
-def test_debug_log_names_the_id_interval_and_payload(caplog):
+def test_usage_cycles_parse_a_long_entry_and_the_current_start():
+    past = (HOUR_BEFORE - 86400, HOUR_BEFORE)
+    current = (HOUR_MIDNIGHT, HOUR_MIDNIGHT + 86400)
+    padding = _len_field(10, b"\x00" * 120)
+    entry = _timestamp(2, current[0]) + _timestamp(3, current[1]) + padding
+    assert len(entry) >= 128
+    older = _timestamp(2, past[0]) + _timestamp(3, past[1])
+    payload = _len_field(1, older) + _len_field(1, entry) + b"\x12\x07asset-1"
+    parsed = BasePowerApiClient._parse_usage_cycles(payload, NOW)
+    assert parsed["asset_id"] == "asset-1"
+    assert parsed["cycle_start"] == HOUR_MIDNIGHT
+
+    asset_only = BasePowerApiClient._parse_usage_cycles(b"\x12\x07asset-1", NOW)
+    assert asset_only["asset_id"] == "asset-1"
+    assert asset_only["cycle_start"] is None
+
+
+def test_recent_usage_converts_average_kw_and_totals_today_only():
+    points = BasePowerApiClient._parse_recent_usage(
+        _recent_point(HOUR_BEFORE, 100.0)
+        + _recent_point(HOUR_MIDNIGHT, 4.0)
+        + _recent_point(HOUR_LATER, 8.0)
+    )
+    assert [(point["kwh"], point["watts"]) for point in points] == [
+        (25.0, 100000),
+        (1.0, 4000),
+        (2.0, 8000),
+    ]
+    summary = summarize_recent_usage(points, ZONE, NOW)
+    assert summary["current_kwh"] == 2.0
+    assert summary["current_power_watts"] == 8000
+    assert summary["daily_total_kwh"] == 3.0
+    assert summary["daily_peak_kwh"] == 2.0
+    assert summary["daily_low_kwh"] == 1.0
+    assert summary["intervals_today"] == 2
+
+    # The old reading treated kW as kWh and multiplied by 4000 for watts.
+    assert points[-1]["watts"] != round(8.0 * 4000)
+    assert summary["daily_total_kwh"] != round(100.0 + 4.0 + 8.0, 3)
+
+
+def test_debug_log_shows_the_numeric_payload_without_an_interval(caplog):
     caplog.set_level(logging.DEBUG, logger="custom_components.base_power.api")
+    body = _energy_body([1.0], [0.0], [HOUR_LATER])
 
     async def check() -> None:
-        client = RecordingClient([ENERGY_OK])
-        await client.get_usage_energy(ADDRESS, 49652, (1_700_000_000, 1_700_086_400))
+        client = RecordingClient([body])
+        await client.get_usage_energy(ADDRESS, 49652, ZONE, NOW)
 
     _run(check())
     text = caplog.text
     assert "MobileGetUsageEnergy request using=numeric" in text
     assert "numeric_service_location_id=49652" in text
-    assert "interval_start=1700000000" in text
-    assert "interval_end=1700086400" in text
-    payload, mode = build_site_payload(ADDRESS, 49652, (1_700_000_000, 1_700_086_400))
-    assert mode == "numeric"
-    assert payload.hex() in text
+    assert "interval_start=" not in text
+    payload = _api._encode_int_service_location(49652)
+    assert payload == bytes.fromhex(text.split("payload=")[1].split()[0])
+    assert payload == b"\x08" + _api._encode_varint(49652)
+
+
+def test_auth_logs_mask_the_session_id():
+    assert _auth._mask_secret(None) == "none"
+    assert _auth._mask_secret("sess_example_value") == "...alue"
+    source = (_ROOT / "custom_components" / "base_power" / "auth.py").read_text()
+    assert "_LOGGER.warning" not in source
+    assert "client_token[:20]" not in source
+    assert "_mask_secret(session_id)" in source
+    assert "code=%s" not in source
+    assert "jwt=%s" not in source
