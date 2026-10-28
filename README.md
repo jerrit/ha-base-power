@@ -27,7 +27,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Connectivity** — Whether the gateway is connected
 - **Billing** — Bill amount and due date when the account returns them
 
-Energy split, self-sufficiency, grid amps, and the daily grid totals stay unknown. The current grid response is a voltage series, not those summaries.
+Energy split and self-sufficiency request the numeric service location id and the local calendar day. They stay unknown until that call returns a breakdown. Grid amps and the daily grid totals stay unknown: grid status is a voltage series, not those summaries.
 
 ## Installation
 
@@ -114,7 +114,7 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 | Battery discharge | Battery to Home Energy |
 | Home consumption | Total Home Energy |
 
-Those four sensors stay unknown until the usage-energy call returns a breakdown. Recent usage still fills Current Power, the daily totals, and the interval sensors.
+Those four sensors stay unknown until the usage-energy call returns a breakdown. The request sends the numeric service location id from the dashboard and the local calendar day as a start and end timestamp. Recent usage still fills Current Power, the daily totals, and the interval sensors.
 
 ## Technical Details
 
@@ -140,12 +140,15 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Daily energy still comes from the 15-minute usage series.
 - **Battery Charging while full.** A flat 100% reads off. Confirmed on the development account.
 - **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
-- **Energy split, self-sufficiency, daily grid total.** Still unknown. Usage calls also need the numeric id plus an interval, and that parser is not in this change.
+- **Energy split, self-sufficiency, daily grid total.** Usage calls now send the numeric service location id and the local calendar day. Confirm `UsageEnergy parsed` shows grid, solar, and battery kWh. Daily grid total and grid amps stay unknown: the grid response is still a voltage series. A missing breakdown stays unknown.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
 
 ## Changelog
+
+### Unreleased
+- Recent usage, usage energy, billing, usage cycles, and Wi-Fi send the numeric service location id and the local calendar day. A missing id, or an empty reply, falls back to the address string. Empty replies stay unknown.
 
 ### v1.11.0
 - Capacity choices are 25, 40, 50, and 80 kWh. Base Core's published size is 39.2 kWh per unit (78.4 for two); the options use those sizes rounded.

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import struct
 import logging
+import math
+import struct
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 
@@ -63,6 +66,79 @@ def _encode_int_service_location(service_location_id: int) -> bytes:
     address id is a different string and those methods ignore it.
     """
     return b"\x08" + _encode_varint(service_location_id)
+
+
+def _encode_timestamp_field(field_number: int, seconds: int) -> bytes:
+    """Encode a google.protobuf.Timestamp (seconds only) as a length-delimited field."""
+    message = b"\x08" + _encode_varint(int(seconds))
+    tag = (field_number << 3) | 2
+    return _encode_varint(tag) + _encode_varint(len(message)) + message
+
+
+def _zone(time_zone: str | None) -> ZoneInfo | datetime.tzinfo:
+    """Resolve a Home Assistant time zone, falling back to UTC."""
+    if not time_zone:
+        return UTC
+    try:
+        return ZoneInfo(time_zone)
+    except ZoneInfoNotFoundError:
+        _LOGGER.debug("Unknown time zone %s; using UTC for the usage interval", time_zone)
+        return UTC
+
+
+def local_day_interval(
+    time_zone: str | None, now: datetime | None = None
+) -> tuple[int, int]:
+    """Return the local calendar day's [start, end) as Unix seconds.
+
+    Usage energy sums the window it is given. The sensors are daily, so the
+    window is local midnight through the next local midnight.
+    """
+    zone = _zone(time_zone)
+    if now is None:
+        current = datetime.now(zone)
+    elif now.tzinfo is None:
+        current = now.replace(tzinfo=zone)
+    else:
+        current = now.astimezone(zone)
+    start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def build_site_payload(
+    address_id: str,
+    numeric_service_location_id: int | None,
+    interval: tuple[int, int] | None = None,
+) -> tuple[bytes, str]:
+    """Encode a site-scoped DashboardAPI request.
+
+    Returns ``(payload, "numeric"|"address")``.
+
+    Field 1 is the numeric service location id, the same int32 grid status
+    uses. Field 2 and field 3 are the interval start and end as
+    ``google.protobuf.Timestamp`` seconds. Usage calls ignore the external
+    address string; an empty usage or energy frame with only that string is
+    the failure these methods were seeing.
+
+    When the numeric id is not known yet, the payload stays the address
+    string in field 1 and the interval is left off. That is the previous
+    request, which still returns data for some accounts.
+    """
+    if (
+        isinstance(numeric_service_location_id, int)
+        and not isinstance(numeric_service_location_id, bool)
+        and numeric_service_location_id > 0
+    ):
+        payload = _encode_int_service_location(numeric_service_location_id)
+        if (
+            interval is not None
+            and interval[1] > interval[0] >= 0
+        ):
+            payload += _encode_timestamp_field(2, interval[0])
+            payload += _encode_timestamp_field(3, interval[1])
+        return payload, "numeric"
+    return _encode_service_location_request(address_id), "address"
 
 
 def _decode_varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -184,6 +260,11 @@ def _parse_first_location_id(data: bytes) -> str | None:
     return None
 
 
+def _has_any_value(parsed: dict[str, Any]) -> bool:
+    """True when a parser found at least one reading."""
+    return any(value is not None for value in parsed.values())
+
+
 def _parse_billing_fields(data: bytes, result: dict[str, Any], *, nested: bool = False) -> None:
     """Read amount_cents and due_date from a billing message."""
     offset = 0
@@ -300,11 +381,22 @@ class BasePowerApiClient:
         data = await self._call("MobileGetDashboardRoot", payload)
         return self._parse_dashboard_root(data)
 
-    async def get_recent_usage(self, service_location_id: str) -> list[dict[str, Any]]:
+    async def get_recent_usage(
+        self,
+        service_location_id: str,
+        numeric_service_location_id: int | None = None,
+        interval: tuple[int, int] | None = None,
+    ) -> list[dict[str, Any]]:
         """Get recent 15-min interval usage data."""
-        payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetRecentUsage", payload)
-        return self._parse_recent_usage(data)
+        return await self._fetch_parsed(
+            "MobileGetRecentUsage",
+            service_location_id,
+            numeric_service_location_id,
+            interval,
+            self._parse_recent_usage,
+            bool,
+            optional=False,
+        )
 
     async def get_grid_status(self, service_location_id: int) -> dict[str, Any]:
         """Get grid voltage samples for a numeric service location id."""
@@ -318,29 +410,154 @@ class BasePowerApiClient:
         data = await self._call("MobileGetServiceContext", payload, optional=True)
         return self._parse_service_context(data)
 
-    async def get_usage_energy(self, service_location_id: str) -> dict[str, Any]:
+    async def get_usage_energy(
+        self,
+        service_location_id: str,
+        numeric_service_location_id: int | None = None,
+        interval: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
         """Get energy breakdown (grid-to-home, solar-to-home kWh)."""
-        payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetUsageEnergy", payload, optional=True)
-        return self._parse_usage_energy(data)
+        return await self._fetch_parsed(
+            "MobileGetUsageEnergy",
+            service_location_id,
+            numeric_service_location_id,
+            interval,
+            self._parse_usage_energy,
+            _has_any_value,
+            optional=True,
+        )
 
-    async def get_billing_metadata(self, service_location_id: str) -> dict[str, Any]:
+    async def get_billing_metadata(
+        self,
+        service_location_id: str,
+        numeric_service_location_id: int | None = None,
+        interval: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
         """Get billing info (amount, due date)."""
-        payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetBillingMetadata", payload, optional=True)
-        return self._parse_billing_metadata(data)
+        return await self._fetch_parsed(
+            "MobileGetBillingMetadata",
+            service_location_id,
+            numeric_service_location_id,
+            interval,
+            self._parse_billing_metadata,
+            _has_any_value,
+            optional=True,
+        )
 
-    async def get_wifi_metrics(self, service_location_id: str) -> dict[str, Any]:
+    async def get_wifi_metrics(
+        self,
+        service_location_id: str,
+        numeric_service_location_id: int | None = None,
+        interval: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
         """Get battery WiFi connectivity metrics."""
-        payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetWifiMetrics", payload, optional=True)
-        return self._parse_wifi_metrics(data)
+        return await self._fetch_parsed(
+            "MobileGetWifiMetrics",
+            service_location_id,
+            numeric_service_location_id,
+            interval,
+            self._parse_wifi_metrics,
+            lambda parsed: bool(parsed.get("scan")),
+            optional=True,
+        )
 
-    async def get_usage_cycles(self, service_location_id: str) -> dict[str, Any]:
+    async def get_usage_cycles(
+        self,
+        service_location_id: str,
+        numeric_service_location_id: int | None = None,
+        interval: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
         """Get usage cycle dates and asset ID."""
-        payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetUsageCycles", payload, optional=True)
-        return self._parse_usage_cycles(data)
+        return await self._fetch_parsed(
+            "MobileGetUsageCycles",
+            service_location_id,
+            numeric_service_location_id,
+            interval,
+            self._parse_usage_cycles,
+            _has_any_value,
+            optional=True,
+        )
+
+    async def _fetch_parsed(
+        self,
+        method: str,
+        address_id: str,
+        numeric_service_location_id: int | None,
+        interval: tuple[int, int] | None,
+        parse,
+        present,
+        *,
+        optional: bool,
+    ):
+        """Call a site RPC with the numeric id, then the address string.
+
+        A missing numeric id, an empty frame, or a frame the parser cannot
+        read falls back to the address-string request. The fallback is the
+        previous encoding, so a poll cannot crash or replace a working
+        reading with an empty one when the numeric id is not available yet.
+        """
+        if (
+            isinstance(numeric_service_location_id, int)
+            and not isinstance(numeric_service_location_id, bool)
+            and numeric_service_location_id > 0
+        ):
+            payload, mode = build_site_payload(
+                address_id, numeric_service_location_id, interval
+            )
+            self._log_site_request(
+                method, mode, numeric_service_location_id, interval, payload
+            )
+            try:
+                raw = await self._call(method, payload, optional=True)
+            except Exception as err:
+                _LOGGER.debug(
+                    "%s numeric request failed (%s); falling back to address id",
+                    method,
+                    err,
+                )
+                raw = b""
+            parsed = parse(raw)
+            if present(parsed):
+                return parsed
+            start = interval[0] if interval else None
+            end = interval[1] if interval else None
+            _LOGGER.debug(
+                "%s empty with numeric service location id %s "
+                "interval_start=%s interval_end=%s; falling back to address id",
+                method,
+                numeric_service_location_id,
+                start,
+                end,
+            )
+        else:
+            _LOGGER.debug(
+                "%s numeric service location id unavailable; falling back to address id",
+                method,
+            )
+        payload, mode = build_site_payload(address_id, None, None)
+        self._log_site_request(method, mode, None, None, payload)
+        raw = await self._call(method, payload, optional=optional)
+        return parse(raw)
+
+    @staticmethod
+    def _log_site_request(
+        method: str,
+        mode: str,
+        numeric_service_location_id: int | None,
+        interval: tuple[int, int] | None,
+        payload: bytes,
+    ) -> None:
+        """Log the site id and interval actually written into the request."""
+        _LOGGER.debug(
+            "%s request using=%s numeric_service_location_id=%s "
+            "interval_start=%s interval_end=%s payload=%s",
+            method,
+            mode,
+            numeric_service_location_id,
+            interval[0] if interval else None,
+            interval[1] if interval else None,
+            payload.hex(),
+        )
 
     @staticmethod
     def _parse_dashboard_root(data: bytes) -> dict[str, Any]:
@@ -743,10 +960,12 @@ class BasePowerApiClient:
     def _parse_usage_energy(data: bytes) -> dict[str, Any]:
         """Parse MobileGetUsageEnergy response.
 
-        Expected fields (float32 or varint):
+        Expected fields (float32 or double):
           Field 1: grid_to_home_kwh
           Field 2: solar_to_home_kwh
           Field 3: battery_to_home_kwh
+
+        A missing field stays None. Zero is a real reading. NaN is not.
         """
         result: dict[str, Any] = {
             "grid_to_home_kwh": None,
@@ -757,30 +976,18 @@ class BasePowerApiClient:
             return result
 
         _LOGGER.debug("UsageEnergy raw hex: %s", data.hex())
-
-        offset = 0
-        while offset < len(data):
-            if offset >= len(data):
-                break
-            tag = data[offset]
-            field_num = tag >> 3
-            wire_type = tag & 0x07
-            offset += 1
-
-            if wire_type == 5:  # 32-bit (float)
-                if offset + 4 <= len(data):
-                    val = struct.unpack("<f", data[offset : offset + 4])[0]
-                    if field_num == 1:
-                        result["grid_to_home_kwh"] = round(val, 3)
-                    elif field_num == 2:
-                        result["solar_to_home_kwh"] = round(val, 3)
-                    elif field_num == 3:
-                        result["battery_to_home_kwh"] = round(val, 3)
-                offset += 4
-            elif wire_type == 0:
-                _, offset = _decode_varint(data, offset)
-            else:
-                offset = _skip_field(data, offset, wire_type)
+        keys = {
+            1: "grid_to_home_kwh",
+            2: "solar_to_home_kwh",
+            3: "battery_to_home_kwh",
+        }
+        for field_num, kind, value in _iter_fields(data):
+            key = keys.get(field_num)
+            if key is None or kind not in ("float", "double"):
+                continue
+            if not math.isfinite(value):
+                continue
+            result[key] = round(value, 3)
 
         _LOGGER.debug("UsageEnergy parsed: %s", result)
         return result

@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from .api import BasePowerApiClient
+from .api import BasePowerApiClient, local_day_interval
 from .auth import BasePowerAuth, AuthenticationError
 from .const import (
     SCAN_INTERVAL_SECONDS,
@@ -64,21 +64,38 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             jwt = await self.auth.async_ensure_valid_token()
             self.api.set_jwt(jwt)
 
-            # Fetch core data (required)
+            # Fetch core data (required). Dashboard root is what carries the
+            # numeric service location id the usage calls need.
             dashboard = await self.api.get_dashboard_root(self.service_location_id)
-            usage = await self.api.get_recent_usage(self.service_location_id)
+            numeric_id = dashboard.get("service_location_id")
+            if numeric_id:
+                self._numeric_service_location_id = numeric_id
+            time_zone = getattr(getattr(self.hass, "config", None), "time_zone", None)
+            interval = local_day_interval(time_zone)
+            _LOGGER.debug(
+                "Site window numeric_service_location_id=%s interval_start=%s interval_end=%s",
+                self._numeric_service_location_id,
+                interval[0],
+                interval[1],
+            )
+            usage = await self.api.get_recent_usage(
+                self.service_location_id,
+                numeric_service_location_id=self._numeric_service_location_id,
+                interval=interval,
+            )
 
             # Fetch optional data (non-fatal if they fail).
             # An empty grid poll must stay unknown. Do not reuse an older
             # "grid is up" reading, or an outage that stops telemetry looks fine.
-            numeric_id = dashboard.get("service_location_id")
-            if numeric_id:
-                self._numeric_service_location_id = numeric_id
             grid = await self._async_fetch_grid(self._numeric_service_location_id)
             wifi: dict[str, Any] = {"ssid": None, "signal": None, "connected": False}
 
             try:
-                wifi = await self.api.get_wifi_metrics(self.service_location_id)
+                wifi = await self.api.get_wifi_metrics(
+                    self.service_location_id,
+                    numeric_service_location_id=self._numeric_service_location_id,
+                    interval=interval,
+                )
                 scan: dict[str, int | None] = wifi.get("scan", {})
                 preferred_ssid: str | None = self._config_entry.options.get(CONF_WIFI_SSID) or None
                 if preferred_ssid and preferred_ssid in scan:
@@ -93,7 +110,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("WifiMetrics fetch failed: %s", err)
 
             try:
-                fetched_energy = await self.api.get_usage_energy(self.service_location_id)
+                fetched_energy = await self.api.get_usage_energy(
+                    self.service_location_id,
+                    numeric_service_location_id=self._numeric_service_location_id,
+                    interval=interval,
+                )
                 if any(value is not None for value in fetched_energy.values()):
                     self._last_energy = fetched_energy
             except Exception as err:
@@ -101,7 +122,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             energy = self._last_energy
 
             try:
-                fetched_billing = await self.api.get_billing_metadata(self.service_location_id)
+                fetched_billing = await self.api.get_billing_metadata(
+                    self.service_location_id,
+                    numeric_service_location_id=self._numeric_service_location_id,
+                    interval=interval,
+                )
                 if any(value is not None for value in fetched_billing.values()):
                     self._last_billing = fetched_billing
             except Exception as err:
@@ -109,7 +134,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             billing = self._last_billing
 
             try:
-                fetched_cycles = await self.api.get_usage_cycles(self.service_location_id)
+                fetched_cycles = await self.api.get_usage_cycles(
+                    self.service_location_id,
+                    numeric_service_location_id=self._numeric_service_location_id,
+                    interval=interval,
+                )
                 if any(value is not None for value in fetched_cycles.values()):
                     self._last_cycles = fetched_cycles
             except Exception as err:
