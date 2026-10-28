@@ -100,6 +100,25 @@ def daily_grid_total_kwh(coordinator_data: dict[str, Any] | None) -> float | Non
     return float(value)
 
 
+def grid_current_amps(power_from_grid_kw: float | None, voltage_volts: float | None) -> float | None:
+    """Grid current from power and voltage.
+
+    Amps are ``kW * 1000 / volts``. A negative ``power_from_grid_kw`` is power
+    leaving the house toward the grid, so the current stays negative. Zero
+    power is a real zero. Missing values, a non-positive voltage, or a
+    non-finite number stay unknown.
+    """
+    if isinstance(power_from_grid_kw, bool) or isinstance(voltage_volts, bool):
+        return None
+    if not isinstance(power_from_grid_kw, (int, float)) or not isinstance(voltage_volts, (int, float)):
+        return None
+    if not math.isfinite(power_from_grid_kw) or not math.isfinite(voltage_volts):
+        return None
+    if voltage_volts <= 0:
+        return None
+    return round(power_from_grid_kw * 1000 / voltage_volts, 3)
+
+
 def _encode_service_location_request(service_location_id: str) -> bytes:
     """Encode a protobuf request with the external address id as field 1 (string)."""
     encoded = service_location_id.encode("utf-8")
@@ -206,6 +225,7 @@ def summarize_recent_usage(
         "daily_peak_kwh": 0.0,
         "daily_low_kwh": 0.0,
         "daily_total_kwh": 0.0,
+        "daily_avg_kwh": None,
         "intervals_today": 0,
     }
     if not points:
@@ -228,6 +248,10 @@ def summarize_recent_usage(
     summary["daily_low_kwh"] = min(today)
     summary["daily_total_kwh"] = round(sum(today), 3)
     summary["intervals_today"] = len(today)
+    if summary["intervals_today"] > 0:
+        summary["daily_avg_kwh"] = round(
+            summary["daily_total_kwh"] / summary["intervals_today"], 3
+        )
     return summary
 
 
@@ -994,7 +1018,9 @@ class BasePowerApiClient:
             "power_from_storage_kw": context.get("power_from_storage_kw"),
             "power_from_solar_kw": context.get("power_from_solar_kw"),
             "power_to_home_kw": context.get("power_to_home_kw"),
-            "current_power_amps": None,
+            "current_power_amps": grid_current_amps(
+                context.get("power_from_grid_kw"), voltage.get("voltage_volts")
+            ),
             "hourly_usage": [],
             "grid_is_up": BasePowerApiClient._resolve_grid_is_up(context, voltage),
         }

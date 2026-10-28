@@ -559,7 +559,11 @@ class BasePowerDailyTotalGridSensor(BasePowerSensorBase):
 
 
 class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
-    """Sensor for daily average 15-min interval energy from grid."""
+    """Average kWh of today's 15-minute usage intervals.
+
+    This is daily total energy divided by the number of intervals today.
+    None when today has no intervals.
+    """
 
     _attr_name = "Daily Average Grid Interval"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
@@ -573,9 +577,9 @@ class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        """Return daily average 15-min interval kWh from grid."""
+        """Return today's average 15-min kWh, or unknown when there are no intervals."""
         if self.coordinator.data:
-            return self.coordinator.data.get("grid", {}).get("daily_avg_kwh_grid")
+            return self.coordinator.data.get("derived", {}).get("daily_avg_kwh")
         return None
 
 

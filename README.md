@@ -27,7 +27,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Connectivity** — Whether the gateway is connected
 - **Billing** — Bill amount and due date when the account returns them
 
-Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from `MobileGetUsageEnergy`. That call uses the numeric service location id. Daily Total (Grid) is the grid sum. Battery to Home stays unknown. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps and the daily average grid interval stay unknown: grid status is a voltage series.
+Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from `MobileGetUsageEnergy`. That call uses the numeric service location id. Daily Total (Grid) is the grid sum. Battery to Home stays unknown. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
 
 ## Installation
 
@@ -74,9 +74,9 @@ Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples f
 | Battery to Home Energy | Energy discharged from battery | kWh |
 | Total Home Energy | Combined home consumption (grid + solar + battery) | kWh |
 | Self-Sufficiency | % of home energy from solar + battery | % |
-| Grid Power (amps) | Not reported by the current grid API | A |
+| Grid Power (amps) | Grid kW × 1000 ÷ volts. Negative means export | A |
 | Daily Total (Grid) | Today's grid kWh, the same sum as Grid to Home | kWh |
-| Daily Average Grid Interval | Not reported by the current grid API | kWh |
+| Daily Average Grid Interval | Today's usage total ÷ intervals today | kWh |
 
 ### Binary Sensors
 
@@ -142,7 +142,9 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
 - **Grid to Home and Solar to Home.** `MobileGetUsageEnergy` uses the numeric service location id and no time fields. `UsageEnergy parsed` should show today's summed grid and solar kWh. Battery to Home stays unknown. A missing series stays unknown.
 - **Daily Total Energy.** It sums 15-minute samples from local midnight onward. Each sample is average kW divided by 4. The previous 24-hour sum was about four times too large.
-- **Daily Total (Grid).** Same today's grid kWh as Grid to Home. Unknown when that sum is missing. Grid amps and Daily Average Grid Interval stay unknown.
+- **Daily Total (Grid).** Same today's grid kWh as Grid to Home. Unknown when that sum is missing.
+- **Daily Average Grid Interval.** Today's usage total divided by the number of 15-minute intervals today. Unknown when today has no intervals.
+- **Grid Power (amps).** `power_from_grid_kw * 1000 / voltage_volts` when voltage is above 0. Negative power is export and stays negative. Unknown when either reading is missing.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
@@ -156,6 +158,8 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 - The current billing cycle is the latest start at or before now. Its end, which is the server time of the request, is not used.
 - Daily Total (Grid) shows today's grid kWh from usage energy.
 - gRPC status is read from the trailer frame in the response body as well as from the headers.
+- Daily Average Grid Interval is today's usage total divided by the interval count.
+- Grid Power in amps is grid kilowatts times 1000 divided by voltage. Negative means export.
 
 ### v1.11.0
 - Capacity choices are 25, 40, 50, and 80 kWh. Base Core's published size is 39.2 kWh per unit (78.4 for two); the options use those sizes rounded.

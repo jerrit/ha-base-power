@@ -267,6 +267,7 @@ def test_recent_usage_converts_average_kw_and_totals_today_only():
     assert summary["daily_peak_kwh"] == 2.0
     assert summary["daily_low_kwh"] == 1.0
     assert summary["intervals_today"] == 2
+    assert summary["daily_avg_kwh"] == 1.5
 
     # The old reading treated kW as kWh and multiplied by 4000 for watts.
     assert points[-1]["watts"] != round(8.0 * 4000)
@@ -305,6 +306,52 @@ def test_open_cycle_ending_at_the_request_time_is_current():
     )
     parsed = BasePowerApiClient._parse_usage_cycles(payload, NOW)
     assert parsed["cycle_start"] == HOUR_MIDNIGHT
+
+
+def test_daily_average_interval_is_today_total_over_count():
+    share = 15.422 / 44
+    points = [
+        {"timestamp": HOUR_LATER + index, "kwh": share, "watts": 1}
+        for index in range(44)
+    ]
+    summary = summarize_recent_usage(points, ZONE, NOW)
+    assert summary["intervals_today"] == 44
+    assert summary["daily_total_kwh"] == 15.422
+    assert summary["daily_avg_kwh"] == round(15.422 / 44, 3)
+    assert abs(summary["daily_avg_kwh"] - 0.351) < 0.001
+
+    empty = summarize_recent_usage([], ZONE, NOW)
+    assert empty["intervals_today"] == 0
+    assert empty["daily_avg_kwh"] is None
+
+    yesterday = summarize_recent_usage(
+        [{"timestamp": HOUR_BEFORE, "kwh": 4.0, "watts": 1000}], ZONE, NOW
+    )
+    assert yesterday["intervals_today"] == 0
+    assert yesterday["daily_avg_kwh"] is None
+
+
+def test_grid_current_amps_from_power_and_voltage():
+    assert _api.grid_current_amps(1.3, 245) == round(1.3 * 1000 / 245, 3)
+    assert _api.grid_current_amps(0, 245) == 0.0
+    # Negative grid power is export. The sign is kept.
+    assert _api.grid_current_amps(-1.3, 245) == round(-1.3 * 1000 / 245, 3)
+    assert _api.grid_current_amps(None, 245) is None
+    assert _api.grid_current_amps(1.3, None) is None
+    assert _api.grid_current_amps(1.3, 0) is None
+    assert _api.grid_current_amps(1.3, -10) is None
+    assert _api.grid_current_amps(float("nan"), 245) is None
+
+    combined = BasePowerApiClient.combine_grid_telemetry(
+        {"available": True, "power_from_grid_kw": 1.3},
+        {"available": True, "voltage_volts": 245.0},
+    )
+    assert combined["current_power_amps"] == round(1.3 * 1000 / 245, 3)
+    missing = BasePowerApiClient.combine_grid_telemetry(
+        {"available": True},
+        {"available": True, "voltage_volts": 245.0},
+    )
+    assert missing["current_power_amps"] is None
 
 
 def test_daily_grid_total_uses_today_grid_kwh():
