@@ -139,7 +139,7 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Battery Backup Time.** This reads `availableBackup` hours and should move as the house load changes. The dashboard value 49652 is the numeric service location id, not a backup duration.
 - **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Otherwise the latest 15-minute sample is average kW, and watts are that value times 1000.
 - **Battery Charging while full.** A flat 100% reads off. Confirmed on the development account.
-- **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
+- **Bill Amount and Bill Due Date.** These stay empty on plans that have no billing info. That is a real empty response, not a failed poll. When a bill is present, compare the amount with a Base invoice before treating it as the amount due. The nested sample from issue #6 decodes to $188.53. The unmapped field next to it (33840) is not shown.
 - **Grid to Home and Solar to Home.** `MobileGetUsageEnergy` uses the numeric service location id and no time fields. `UsageEnergy parsed` should show today's summed grid and solar kWh. Battery to Home stays unknown. A missing series stays unknown.
 - **Daily Total Energy.** It sums 15-minute samples from local midnight onward. Each sample is average kW divided by 4. The previous 24-hour sum was about four times too large.
 - **Daily Total (Grid).** Same today's grid kWh as Grid to Home. Unknown when that sum is missing.
@@ -151,16 +151,16 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 
 ## Changelog
 
-### Unreleased
-- `MobileGetUsageEnergy` sends only the numeric service location id. The other usage, billing, cycle, and Wi-Fi calls keep the address string. The energy reply is an hourly series; today's grid and solar hours are summed. Battery energy stays unknown.
-- Recent usage samples are average kW. Interval energy is that value divided by 4, watts are the value times 1000, and the daily total includes only the local day.
-- Clerk session ids are not written to the log in full.
-- The current billing cycle is the latest start at or before now. Its end, which is the server time of the request, is not used.
-- Daily Total (Grid) shows today's grid kWh from usage energy.
+### v1.12.0
+- Usage energy is parsed from the hourly series. Grid to Home, Solar to Home, Total Home Energy, Self-Sufficiency, and Daily Total (Grid) use today's samples. Battery to Home stays unknown.
+- Only `MobileGetUsageEnergy` sends the numeric service location id. Recent usage, billing, usage cycles, and Wi-Fi keep the address string.
+- Recent usage values are average kW, not kWh. Watts are that value times 1000, interval energy is the value divided by 4, and the daily total counts only today's intervals. The old math was about four times too high.
+- Daily Average Grid Interval is today's usage total divided by the number of 15-minute intervals. Grid Power (amps) is grid kilowatts times 1000 divided by voltage. A negative value is export.
+- The current billing cycle start is parsed. Its end, the server clock at request time, is not used to decide which cycle is current.
 - gRPC status is read from the trailer frame in the response body as well as from the headers.
-- Daily Average Grid Interval is today's usage total divided by the interval count.
-- Grid Power in amps is grid kilowatts times 1000 divided by voltage. Negative means export.
-- Polling is tiered: live grid every 60 seconds, usage every 15 minutes, dashboard, Wi-Fi, billing, and cycles every 6 hours. About 129 calls an hour instead of about 216.
+- The Clerk session id is no longer written to the log in full.
+- Polling is tiered: service context and grid status every 60 seconds, recent usage and usage energy every 15 minutes, and dashboard, Wi-Fi, billing, and usage cycles every 6 hours. About 129 calls an hour instead of about 216.
+- Bill amount and bill due date stay empty on plans that have no billing info. That empty response is expected.
 
 ### v1.11.0
 - Capacity choices are 25, 40, 50, and 80 kWh. Base Core's published size is 39.2 kWh per unit (78.4 for two); the options use those sizes rounded.
