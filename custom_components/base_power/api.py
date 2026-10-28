@@ -7,6 +7,7 @@ import math
 import struct
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
@@ -27,17 +28,76 @@ def _build_grpc_frame(payload: bytes) -> bytes:
     return b"\x00" + struct.pack(">I", len(payload)) + payload
 
 
-def _parse_grpc_frame(response: bytes) -> bytes:
-    """Extract protobuf data from gRPC-Web response frame."""
-    if len(response) < 5:
-        return b""
-    flag = response[0]
-    if flag == 0x80:  # Trailer only, no data
-        return b""
-    length = struct.unpack(">I", response[1:5])[0]
-    if length == 0:
-        return b""
-    return response[5 : 5 + length]
+def _read_grpc_web(response: bytes) -> tuple[bytes, str, str]:
+    """Split a gRPC-Web body into the protobuf message and trailer status.
+
+    Each frame is a flag byte, a 4-byte length, and that many payload bytes.
+    Flag 0x80 is the trailer, an HTTP header block. Live responses put
+    ``grpc-status`` there instead of in the response headers.
+    """
+    message = b""
+    status = ""
+    grpc_message = ""
+    offset = 0
+    while offset + 5 <= len(response):
+        flag = response[offset]
+        length = struct.unpack(">I", response[offset + 1 : offset + 5])[0]
+        offset += 5
+        if offset + length > len(response):
+            break
+        frame = response[offset : offset + length]
+        offset += length
+        if flag & 0x80:
+            text = frame.decode("utf-8", "replace")
+            for line in text.splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if key == "grpc-status":
+                    status = value
+                elif key == "grpc-message":
+                    grpc_message = unquote(value)
+        elif not message:
+            message = frame
+    return message, status, grpc_message
+
+
+def _merge_grpc_status(
+    header_status: str, header_message: str, body: bytes
+) -> tuple[bytes, str, str]:
+    """Prefer a non-zero status from the header or the trailer frame."""
+    message, trailer_status, trailer_message = _read_grpc_web(body)
+    status = (header_status or "").strip()
+    detail = (header_message or "").strip()
+    trailer_status = trailer_status.strip()
+    trailer_message = trailer_message.strip()
+    if trailer_status and trailer_status != "0":
+        return message, trailer_status, trailer_message or detail or "unknown"
+    if not status:
+        status = trailer_status
+        detail = detail or trailer_message
+    if status and status != "0" and not detail:
+        detail = "unknown"
+    return message, status, detail
+
+
+def daily_grid_total_kwh(coordinator_data: dict[str, Any] | None) -> float | None:
+    """Today's grid kWh from usage energy.
+
+    The grid-status call is a voltage series and does not carry this total.
+    None stays unknown on the sensor.
+    """
+    if not coordinator_data:
+        return None
+    energy = coordinator_data.get("energy") or {}
+    value = energy.get("grid_to_home_kwh")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return float(value)
 
 
 def _encode_service_location_request(service_location_id: str) -> bytes:
@@ -362,14 +422,19 @@ class BasePowerApiClient:
             async with session.post(
                 url, headers=headers, data=_build_grpc_frame(b"")
             ) as resp:
-                grpc_status = resp.headers.get("grpc-status", "")
+                raw = await resp.read()
+                data, grpc_status, grpc_message = _merge_grpc_status(
+                    resp.headers.get("grpc-status", ""),
+                    resp.headers.get("grpc-message", ""),
+                    raw,
+                )
                 if grpc_status and grpc_status != "0":
                     _LOGGER.debug(
-                        "MobileGetAvailableLocations grpc-status=%s", grpc_status
+                        "MobileGetAvailableLocations grpc-status=%s message=%s",
+                        grpc_status,
+                        grpc_message,
                     )
                     return None
-                raw = await resp.read()
-                data = _parse_grpc_frame(raw)
                 return _parse_first_location_id(data)
         except Exception:
             _LOGGER.debug("Location discovery request failed", exc_info=True)
@@ -402,18 +467,20 @@ class BasePowerApiClient:
 
         async with self._session.post(url, headers=headers, data=body) as resp:
             response_data = await resp.read()
-            grpc_status = resp.headers.get("grpc-status", "")
+            data, grpc_status, grpc_message = _merge_grpc_status(
+                resp.headers.get("grpc-status", ""),
+                resp.headers.get("grpc-message", ""),
+                response_data,
+            )
             if grpc_status and grpc_status != "0":
-                grpc_message = resp.headers.get("grpc-message", "unknown")
                 log = _LOGGER.debug if optional else _LOGGER.error
                 log(
                     "gRPC error calling %s: status=%s message=%s",
                     method,
                     grpc_status,
-                    grpc_message,
+                    grpc_message or "unknown",
                 )
                 return b"", False
-            data = _parse_grpc_frame(response_data)
             if not data:
                 _LOGGER.debug("%s returned an empty payload", method)
             return data, True
@@ -728,12 +795,15 @@ class BasePowerApiClient:
     def _parse_usage_cycles(
         data: bytes, now: datetime | None = None
     ) -> dict[str, Any]:
-        """Parse asset id and the billing cycle that contains ``now``.
+        """Parse asset id and the latest billing cycle that has already started.
 
         Field 1 repeats a cycle whose field 2 and field 3 are start and end
-        timestamps. Field 2 at the top level is the asset id string. Lengths
-        use varints, so an entry longer than 127 bytes still parses.
-        ``cycle_start`` is the Unix second the current cycle began, or None.
+        timestamps. The open cycle's end is the server clock at request time,
+        so it is already in the past by the time the reply is parsed. The
+        current cycle is the latest start at or before ``now``; its end is
+        ignored. Field 2 at the top level is the asset id string. Lengths use
+        varints, so an entry longer than 127 bytes still parses.
+        ``cycle_start`` is that Unix second, or None.
         """
         result: dict[str, Any] = {"asset_id": None, "cycle_start": None}
         if not data:
@@ -763,11 +833,7 @@ class BasePowerApiClient:
                     cycles.append((start, end))
 
         moment = int((now or datetime.now(UTC)).timestamp())
-        current: int | None = None
-        for start, end in cycles:
-            if start <= moment and (end is None or moment < end):
-                if current is None or start >= current:
-                    current = start
+        current = max((start for start, _end in cycles if start <= moment), default=None)
         result["cycle_start"] = current
         if current is not None:
             _LOGGER.debug("UsageCycles current cycle_start=%s", current)

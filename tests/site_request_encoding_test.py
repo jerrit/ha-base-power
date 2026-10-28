@@ -291,6 +291,91 @@ def test_debug_log_shows_the_numeric_payload_without_an_interval(caplog):
     assert payload == b"\x08" + _api._encode_varint(49652)
 
 
+def test_open_cycle_ending_at_the_request_time_is_current():
+    """The open cycle's end is the server clock, so it is not after now."""
+    moment = int(NOW.timestamp())
+    earlier = HOUR_BEFORE
+    future = moment + 3600
+    payload = b"".join(
+        (
+            _len_field(1, _timestamp(2, earlier) + _timestamp(3, earlier + 60)),
+            _len_field(1, _timestamp(2, HOUR_MIDNIGHT) + _timestamp(3, moment)),
+            _len_field(1, _timestamp(2, future) + _timestamp(3, future + 60)),
+        )
+    )
+    parsed = BasePowerApiClient._parse_usage_cycles(payload, NOW)
+    assert parsed["cycle_start"] == HOUR_MIDNIGHT
+
+
+def test_daily_grid_total_uses_today_grid_kwh():
+    assert _api.daily_grid_total_kwh(None) is None
+    assert _api.daily_grid_total_kwh({}) is None
+    assert _api.daily_grid_total_kwh({"energy": {}}) is None
+    assert _api.daily_grid_total_kwh({"energy": {"grid_to_home_kwh": None}}) is None
+    assert _api.daily_grid_total_kwh({"energy": {"grid_to_home_kwh": 0.0}}) == 0.0
+    assert _api.daily_grid_total_kwh({"energy": {"grid_to_home_kwh": 12.5}}) == 12.5
+    assert _api.daily_grid_total_kwh({"grid": {"daily_total_kwh_grid": 99}}) is None
+
+
+def _grpc_frame(flag: int, payload: bytes) -> bytes:
+    return bytes([flag]) + struct.pack(">I", len(payload)) + payload
+
+
+def test_invoke_reads_header_status_trailer_status_and_success():
+    message = b"\x08\x01"
+    trailer_error = b"grpc-status: 5\r\ngrpc-message: address%20not%20found\r\n"
+    trailer_ok = b"grpc-status: 0\r\n"
+
+    class _Response:
+        def __init__(self, body: bytes, headers: dict[str, str]) -> None:
+            self.headers = headers
+            self._body = body
+
+        async def read(self) -> bytes:
+            return self._body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc) -> bool:
+            return False
+
+    class _Session:
+        def __init__(self, response: _Response) -> None:
+            self._response = response
+
+        def post(self, *_args, **_kwargs) -> _Response:
+            return self._response
+
+    async def call(body: bytes, headers: dict[str, str]):
+        client = BasePowerApiClient(_Session(_Response(body, headers)))
+        return await client._invoke("MobileGetUsageEnergy", b"", optional=True)
+
+    data, ok = _run(
+        call(
+            _grpc_frame(0, message),
+            {"grpc-status": "5", "grpc-message": "from-header"},
+        )
+    )
+    assert ok is False
+    assert data == b""
+
+    data, ok = _run(
+        call(_grpc_frame(0, message) + _grpc_frame(0x80, trailer_error), {})
+    )
+    assert ok is False
+    assert data == b""
+
+    data, ok = _run(
+        call(
+            _grpc_frame(0, message) + _grpc_frame(0x80, trailer_ok),
+            {},
+        )
+    )
+    assert ok is True
+    assert data == message
+
+
 def test_auth_logs_mask_the_session_id():
     assert _auth._mask_secret(None) == "none"
     assert _auth._mask_secret("sess_example_value") == "...alue"
