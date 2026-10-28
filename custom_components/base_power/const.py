@@ -11,9 +11,18 @@ API_CONTENT_TYPE = "application/grpc-web+proto"
 CLERK_DOMAIN = "https://clerk.basepowercompany.com"
 CLERK_JS_VERSION = "5"
 
-# Polling intervals (seconds)
-SCAN_INTERVAL_SECONDS = 300  # 5 minutes
-GRID_SCAN_INTERVAL_SECONDS = 60  # 1 minute
+# Polling intervals (seconds).
+# Steady state is about 128.7 calls/hour:
+#   every 60 s, ServiceContext + GridStatus (120/hour)
+#   every 15 min, RecentUsage + UsageEnergy (8/hour)
+#   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles (~0.7/hour)
+# The coordinator interval is the 15-minute tier. It does not repeat the
+# 60-second grid calls. The old 5-minute full refresh plus the 60-second
+# grid poll was about 216 calls/hour.
+GRID_SCAN_INTERVAL_SECONDS = 60
+USAGE_SCAN_INTERVAL_SECONDS = 15 * 60
+SLOW_SCAN_INTERVAL_SECONDS = 6 * 60 * 60
+SCAN_INTERVAL_SECONDS = USAGE_SCAN_INTERVAL_SECONDS
 # MobileGetGridStatus reports about 240 V while the grid is up.
 # 100 V is still grid. Under 50 V the feed has collapsed.
 GRID_PRESENT_VOLTS = 100.0

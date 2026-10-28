@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import daily_grid_total_kwh
 from .const import DOMAIN, CONF_SERVICE_LOCATION_ID
 from .coordinator import BasePowerCoordinator
 
@@ -532,7 +533,11 @@ class BasePowerGridPowerAmpsSensor(BasePowerSensorBase):
 
 
 class BasePowerDailyTotalGridSensor(BasePowerSensorBase):
-    """Sensor for daily total from grid status endpoint."""
+    """Today's grid kWh from usage energy.
+
+    Grid status does not include this total. The value is the same sum as
+    Grid to Home. None stays unknown.
+    """
 
     _attr_name = "Daily Total (Grid)"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
@@ -547,14 +552,18 @@ class BasePowerDailyTotalGridSensor(BasePowerSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        """Return daily total kWh from grid status."""
+        """Return today's grid kWh, or unknown when usage energy has none."""
         if self.coordinator.data:
-            return self.coordinator.data.get("grid", {}).get("daily_total_kwh_grid")
+            return daily_grid_total_kwh(self.coordinator.data)
         return None
 
 
 class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
-    """Sensor for daily average 15-min interval energy from grid."""
+    """Average kWh of today's 15-minute usage intervals.
+
+    This is daily total energy divided by the number of intervals today.
+    None when today has no intervals.
+    """
 
     _attr_name = "Daily Average Grid Interval"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
@@ -568,9 +577,9 @@ class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        """Return daily average 15-min interval kWh from grid."""
+        """Return today's average 15-min kWh, or unknown when there are no intervals."""
         if self.coordinator.data:
-            return self.coordinator.data.get("grid", {}).get("daily_avg_kwh_grid")
+            return self.coordinator.data.get("derived", {}).get("daily_avg_kwh")
         return None
 
 

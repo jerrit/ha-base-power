@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-import struct
 import logging
+import math
+import struct
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import unquote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 
@@ -24,17 +28,95 @@ def _build_grpc_frame(payload: bytes) -> bytes:
     return b"\x00" + struct.pack(">I", len(payload)) + payload
 
 
-def _parse_grpc_frame(response: bytes) -> bytes:
-    """Extract protobuf data from gRPC-Web response frame."""
-    if len(response) < 5:
-        return b""
-    flag = response[0]
-    if flag == 0x80:  # Trailer only, no data
-        return b""
-    length = struct.unpack(">I", response[1:5])[0]
-    if length == 0:
-        return b""
-    return response[5 : 5 + length]
+def _read_grpc_web(response: bytes) -> tuple[bytes, str, str]:
+    """Split a gRPC-Web body into the protobuf message and trailer status.
+
+    Each frame is a flag byte, a 4-byte length, and that many payload bytes.
+    Flag 0x80 is the trailer, an HTTP header block. Live responses put
+    ``grpc-status`` there instead of in the response headers.
+    """
+    message = b""
+    status = ""
+    grpc_message = ""
+    offset = 0
+    while offset + 5 <= len(response):
+        flag = response[offset]
+        length = struct.unpack(">I", response[offset + 1 : offset + 5])[0]
+        offset += 5
+        if offset + length > len(response):
+            break
+        frame = response[offset : offset + length]
+        offset += length
+        if flag & 0x80:
+            text = frame.decode("utf-8", "replace")
+            for line in text.splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if key == "grpc-status":
+                    status = value
+                elif key == "grpc-message":
+                    grpc_message = unquote(value)
+        elif not message:
+            message = frame
+    return message, status, grpc_message
+
+
+def _merge_grpc_status(
+    header_status: str, header_message: str, body: bytes
+) -> tuple[bytes, str, str]:
+    """Prefer a non-zero status from the header or the trailer frame."""
+    message, trailer_status, trailer_message = _read_grpc_web(body)
+    status = (header_status or "").strip()
+    detail = (header_message or "").strip()
+    trailer_status = trailer_status.strip()
+    trailer_message = trailer_message.strip()
+    if trailer_status and trailer_status != "0":
+        return message, trailer_status, trailer_message or detail or "unknown"
+    if not status:
+        status = trailer_status
+        detail = detail or trailer_message
+    if status and status != "0" and not detail:
+        detail = "unknown"
+    return message, status, detail
+
+
+def daily_grid_total_kwh(coordinator_data: dict[str, Any] | None) -> float | None:
+    """Today's grid kWh from usage energy.
+
+    The grid-status call is a voltage series and does not carry this total.
+    None stays unknown on the sensor.
+    """
+    if not coordinator_data:
+        return None
+    energy = coordinator_data.get("energy") or {}
+    value = energy.get("grid_to_home_kwh")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def grid_current_amps(power_from_grid_kw: float | None, voltage_volts: float | None) -> float | None:
+    """Grid current from power and voltage.
+
+    Amps are ``kW * 1000 / volts``. A negative ``power_from_grid_kw`` is power
+    leaving the house toward the grid, so the current stays negative. Zero
+    power is a real zero. Missing values, a non-positive voltage, or a
+    non-finite number stay unknown.
+    """
+    if isinstance(power_from_grid_kw, bool) or isinstance(voltage_volts, bool):
+        return None
+    if not isinstance(power_from_grid_kw, (int, float)) or not isinstance(voltage_volts, (int, float)):
+        return None
+    if not math.isfinite(power_from_grid_kw) or not math.isfinite(voltage_volts):
+        return None
+    if voltage_volts <= 0:
+        return None
+    return round(power_from_grid_kw * 1000 / voltage_volts, 3)
 
 
 def _encode_service_location_request(service_location_id: str) -> bytes:
@@ -59,10 +141,127 @@ def _encode_varint(value: int) -> bytes:
 def _encode_int_service_location(service_location_id: int) -> bytes:
     """Encode field 1 as the numeric service location id.
 
-    Grid status, service context, and usage take this int32. The external
-    address id is a different string and those methods ignore it.
+    Grid status, service context, and usage energy take this int32.
+    Recent usage, billing, cycles, and Wi-Fi keep the address string.
     """
     return b"\x08" + _encode_varint(service_location_id)
+
+
+def _numeric_location_id(value: int | None) -> int | None:
+    """Return a positive service location id, or None when it is not usable."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _zone(time_zone: str | None) -> ZoneInfo | datetime.tzinfo:
+    """Resolve a Home Assistant time zone, falling back to UTC."""
+    if not time_zone:
+        return UTC
+    try:
+        return ZoneInfo(time_zone)
+    except ZoneInfoNotFoundError:
+        _LOGGER.debug("Unknown time zone %s; using UTC for the usage interval", time_zone)
+        return UTC
+
+
+def local_day_interval(
+    time_zone: str | None, now: datetime | None = None
+) -> tuple[int, int]:
+    """Return the local calendar day's [start, end) as Unix seconds.
+
+    The usage APIs return a rolling day and ignore a requested window. Daily
+    sensors keep the samples that fall in this local day.
+    """
+    zone = _zone(time_zone)
+    if now is None:
+        current = datetime.now(zone)
+    elif now.tzinfo is None:
+        current = now.replace(tzinfo=zone)
+    else:
+        current = now.astimezone(zone)
+    start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def _sum_local_day(
+    samples: list[float], stamps: list[int | None], start: int, end: int
+) -> float | None:
+    """Sum samples whose timestamps fall in ``[start, end)``.
+
+    A length mismatch or a non-finite sample is malformed and returns None.
+    Zero is a real reading when at least one sample is inside the window.
+    """
+    if not samples or len(samples) != len(stamps):
+        return None
+    total = 0.0
+    seen = False
+    for sample, stamp in zip(samples, stamps):
+        if stamp is None or not math.isfinite(sample):
+            return None
+        if start <= stamp < end:
+            total += float(sample)
+            seen = True
+    if not seen:
+        return None
+    return round(total, 3)
+
+
+def summarize_recent_usage(
+    points: list[dict[str, Any]],
+    time_zone: str | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Current interval, and today's 15-minute kWh totals.
+
+    ``kwh`` on each point is already kW / 4. The daily total adds only points
+    at or after local midnight, so the trailing 24-hour series is not summed
+    whole.
+    """
+    summary: dict[str, Any] = {
+        "current_kwh": 0.0,
+        "current_power_watts": 0,
+        "daily_peak_kwh": 0.0,
+        "daily_low_kwh": 0.0,
+        "daily_total_kwh": 0.0,
+        "daily_avg_kwh": None,
+        "intervals_today": 0,
+    }
+    if not points:
+        return summary
+    latest = points[-1]
+    summary["current_kwh"] = latest.get("kwh") or 0.0
+    summary["current_power_watts"] = latest.get("watts") or 0
+    start, end = local_day_interval(time_zone, now)
+    today = [
+        point["kwh"]
+        for point in points
+        if isinstance(point.get("timestamp"), int)
+        and start <= point["timestamp"] < end
+        and isinstance(point.get("kwh"), (int, float))
+        and math.isfinite(point["kwh"])
+    ]
+    if not today:
+        return summary
+    summary["daily_peak_kwh"] = max(today)
+    summary["daily_low_kwh"] = min(today)
+    summary["daily_total_kwh"] = round(sum(today), 3)
+    summary["intervals_today"] = len(today)
+    if summary["intervals_today"] > 0:
+        summary["daily_avg_kwh"] = round(
+            summary["daily_total_kwh"] / summary["intervals_today"], 3
+        )
+    return summary
+
+
+def _timestamp_seconds(message: bytes) -> int | None:
+    """Read google.protobuf.Timestamp.seconds. None when the message is not one."""
+    seconds: int | None = None
+    for field_num, kind, value in _iter_fields(message):
+        if field_num == 1 and kind == "varint":
+            seconds = value
+    return seconds
 
 
 def _decode_varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -247,14 +446,19 @@ class BasePowerApiClient:
             async with session.post(
                 url, headers=headers, data=_build_grpc_frame(b"")
             ) as resp:
-                grpc_status = resp.headers.get("grpc-status", "")
+                raw = await resp.read()
+                data, grpc_status, grpc_message = _merge_grpc_status(
+                    resp.headers.get("grpc-status", ""),
+                    resp.headers.get("grpc-message", ""),
+                    raw,
+                )
                 if grpc_status and grpc_status != "0":
                     _LOGGER.debug(
-                        "MobileGetAvailableLocations grpc-status=%s", grpc_status
+                        "MobileGetAvailableLocations grpc-status=%s message=%s",
+                        grpc_status,
+                        grpc_message,
                     )
                     return None
-                raw = await resp.read()
-                data = _parse_grpc_frame(raw)
                 return _parse_first_location_id(data)
         except Exception:
             _LOGGER.debug("Location discovery request failed", exc_info=True)
@@ -263,10 +467,19 @@ class BasePowerApiClient:
     async def _call(
         self, method: str, payload: bytes = b"", *, optional: bool = False
     ) -> bytes:
-        """Make a gRPC-Web API call.
+        """Make a gRPC-Web API call and return the protobuf message."""
+        data, _ok = await self._invoke(method, payload, optional=optional)
+        return data
 
-        Optional calls log a missing contract or empty frame at debug. Those
-        responses are normal for some accounts and must not fill the error log.
+    async def _invoke(
+        self, method: str, payload: bytes = b"", *, optional: bool = False
+    ) -> tuple[bytes, bool]:
+        """Call one RPC.
+
+        The bool is False when the transport works but gRPC status is not 0.
+        An empty status-0 frame is a successful call with no message.
+        Optional calls log that status at debug so a missing contract does not
+        fill the error log.
         """
         url = f"{API_HOST}/{API_SERVICE}/{method}"
         headers = {
@@ -278,21 +491,23 @@ class BasePowerApiClient:
 
         async with self._session.post(url, headers=headers, data=body) as resp:
             response_data = await resp.read()
-            grpc_status = resp.headers.get("grpc-status", "")
+            data, grpc_status, grpc_message = _merge_grpc_status(
+                resp.headers.get("grpc-status", ""),
+                resp.headers.get("grpc-message", ""),
+                response_data,
+            )
             if grpc_status and grpc_status != "0":
-                grpc_message = resp.headers.get("grpc-message", "unknown")
                 log = _LOGGER.debug if optional else _LOGGER.error
                 log(
                     "gRPC error calling %s: status=%s message=%s",
                     method,
                     grpc_status,
-                    grpc_message,
+                    grpc_message or "unknown",
                 )
-                return b""
-            data = _parse_grpc_frame(response_data)
+                return b"", False
             if not data:
                 _LOGGER.debug("%s returned an empty payload", method)
-            return data
+            return data, True
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
         """Get dashboard root data, including the numeric service location id."""
@@ -301,8 +516,11 @@ class BasePowerApiClient:
         return self._parse_dashboard_root(data)
 
     async def get_recent_usage(self, service_location_id: str) -> list[dict[str, Any]]:
-        """Get recent 15-min interval usage data."""
+        """Get recent 15-min interval usage. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetRecentUsage request using=address payload=%s", payload.hex()
+        )
         data = await self._call("MobileGetRecentUsage", payload)
         return self._parse_recent_usage(data)
 
@@ -318,27 +536,82 @@ class BasePowerApiClient:
         data = await self._call("MobileGetServiceContext", payload, optional=True)
         return self._parse_service_context(data)
 
-    async def get_usage_energy(self, service_location_id: str) -> dict[str, Any]:
-        """Get energy breakdown (grid-to-home, solar-to-home kWh)."""
+    async def get_usage_energy(
+        self,
+        service_location_id: str,
+        numeric_service_location_id: int | None = None,
+        time_zone: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Get today's grid and solar kWh.
+
+        Only this RPC takes the numeric service location id. The server
+        ignores interval fields, so the body is field 1 alone. A missing id
+        or a failed call uses the address string. An empty success does not
+        retry: that address call is empty too.
+        """
+        numeric_id = _numeric_location_id(numeric_service_location_id)
+        if numeric_id is not None:
+            payload = _encode_int_service_location(numeric_id)
+            _LOGGER.debug(
+                "MobileGetUsageEnergy request using=numeric "
+                "numeric_service_location_id=%s payload=%s",
+                numeric_id,
+                payload.hex(),
+            )
+            try:
+                raw, ok = await self._invoke(
+                    "MobileGetUsageEnergy", payload, optional=True
+                )
+            except Exception as err:
+                _LOGGER.debug(
+                    "MobileGetUsageEnergy numeric request failed (%s); "
+                    "falling back to address id",
+                    err,
+                )
+            else:
+                if ok:
+                    return self._parse_usage_energy(raw, time_zone=time_zone, now=now)
+                _LOGGER.debug(
+                    "MobileGetUsageEnergy numeric request failed; "
+                    "falling back to address id"
+                )
+        else:
+            _LOGGER.debug(
+                "MobileGetUsageEnergy numeric service location id unavailable; "
+                "falling back to address id"
+            )
         payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetUsageEnergy", payload, optional=True)
-        return self._parse_usage_energy(data)
+        _LOGGER.debug(
+            "MobileGetUsageEnergy request using=address payload=%s", payload.hex()
+        )
+        raw = await self._call("MobileGetUsageEnergy", payload, optional=True)
+        return self._parse_usage_energy(raw, time_zone=time_zone, now=now)
 
     async def get_billing_metadata(self, service_location_id: str) -> dict[str, Any]:
-        """Get billing info (amount, due date)."""
+        """Get billing info. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetBillingMetadata request using=address payload=%s", payload.hex()
+        )
         data = await self._call("MobileGetBillingMetadata", payload, optional=True)
         return self._parse_billing_metadata(data)
 
     async def get_wifi_metrics(self, service_location_id: str) -> dict[str, Any]:
-        """Get battery WiFi connectivity metrics."""
+        """Get battery WiFi metrics. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetWifiMetrics request using=address payload=%s", payload.hex()
+        )
         data = await self._call("MobileGetWifiMetrics", payload, optional=True)
         return self._parse_wifi_metrics(data)
 
     async def get_usage_cycles(self, service_location_id: str) -> dict[str, Any]:
-        """Get usage cycle dates and asset ID."""
+        """Get usage cycles and the asset id. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
+        _LOGGER.debug(
+            "MobileGetUsageCycles request using=address payload=%s", payload.hex()
+        )
         data = await self._call("MobileGetUsageCycles", payload, optional=True)
         return self._parse_usage_cycles(data)
 
@@ -437,6 +710,9 @@ class BasePowerApiClient:
           0A 0D (field 1, len 13)
           0A 06 08 XX XX XX XX XX (Timestamp varint)
           15 XX XX XX XX (float32, little-endian)
+
+        The float is average kW over the 15 minutes, not kWh. Energy for the
+        interval is kW / 4. Power is kW * 1000.
         """
         points: list[dict[str, Any]] = []
         if not data:
@@ -447,27 +723,26 @@ class BasePowerApiClient:
             if data[offset] != 0x0A or data[offset + 1] != 0x0D:
                 break
 
-            # Decode timestamp varint at offset+5
             ts = 0
             shift = 0
             for i in range(5):
-                b = data[offset + 5 + i]
-                ts |= (b & 0x7F) << shift
+                byte = data[offset + 5 + i]
+                ts |= (byte & 0x7F) << shift
                 shift += 7
-                if not (b & 0x80):
+                if not (byte & 0x80):
                     break
 
-            # Decode float32 at offset+11 (little-endian)
-            kwh = struct.unpack("<f", data[offset + 11 : offset + 15])[0]
-
+            kw = struct.unpack("<f", data[offset + 11 : offset + 15])[0]
+            offset += 15
+            if not math.isfinite(kw):
+                continue
             points.append(
                 {
                     "timestamp": ts,
-                    "kwh": round(kwh, 3),
-                    "watts": round(kwh * 4000),
+                    "kwh": round(kw / 4, 3),
+                    "watts": round(kw * 1000),
                 }
             )
-            offset += 15
 
         return points
 
@@ -541,26 +816,51 @@ class BasePowerApiClient:
         return result
 
     @staticmethod
-    def _parse_usage_cycles(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetUsageCycles response for asset_id."""
-        result: dict[str, Any] = {"asset_id": None}
+    def _parse_usage_cycles(
+        data: bytes, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Parse asset id and the latest billing cycle that has already started.
+
+        Field 1 repeats a cycle whose field 2 and field 3 are start and end
+        timestamps. The open cycle's end is the server clock at request time,
+        so it is already in the past by the time the reply is parsed. The
+        current cycle is the latest start at or before ``now``; its end is
+        ignored. Field 2 at the top level is the asset id string. Lengths use
+        varints, so an entry longer than 127 bytes still parses.
+        ``cycle_start`` is that Unix second, or None.
+        """
+        result: dict[str, Any] = {"asset_id": None, "cycle_start": None}
         if not data:
             return result
 
-        offset = 0
-        while offset < len(data):
-            if data[offset] == 0x12:  # field 2 (asset_id string)
-                str_len = data[offset + 1]
-                result["asset_id"] = data[offset + 2 : offset + 2 + str_len].decode(
-                    "utf-8"
-                )
-                break
-            elif data[offset] == 0x0A:  # field 1 (cycle entry), skip it
-                entry_len = data[offset + 1]
-                offset += 2 + entry_len
-            else:
-                offset += 1
+        cycles: list[tuple[int, int | None]] = []
+        for field_num, kind, value in _iter_fields(data):
+            if field_num == 2 and kind == "bytes" and result["asset_id"] is None:
+                try:
+                    text = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = ""
+                if text and text.isprintable():
+                    result["asset_id"] = text
+            elif field_num == 1 and kind == "bytes":
+                start: int | None = None
+                end: int | None = None
+                for sub_field, sub_kind, sub_value in _iter_fields(value):
+                    if sub_kind != "bytes" or sub_field not in (2, 3):
+                        continue
+                    stamp = _timestamp_seconds(sub_value)
+                    if sub_field == 2:
+                        start = stamp
+                    else:
+                        end = stamp
+                if start is not None:
+                    cycles.append((start, end))
 
+        moment = int((now or datetime.now(UTC)).timestamp())
+        current = max((start for start, _end in cycles if start <= moment), default=None)
+        result["cycle_start"] = current
+        if current is not None:
+            _LOGGER.debug("UsageCycles current cycle_start=%s", current)
         return result
 
     @staticmethod
@@ -718,7 +1018,9 @@ class BasePowerApiClient:
             "power_from_storage_kw": context.get("power_from_storage_kw"),
             "power_from_solar_kw": context.get("power_from_solar_kw"),
             "power_to_home_kw": context.get("power_to_home_kw"),
-            "current_power_amps": None,
+            "current_power_amps": grid_current_amps(
+                context.get("power_from_grid_kw"), voltage.get("voltage_volts")
+            ),
             "hourly_usage": [],
             "grid_is_up": BasePowerApiClient._resolve_grid_is_up(context, voltage),
         }
@@ -740,13 +1042,17 @@ class BasePowerApiClient:
         return None
 
     @staticmethod
-    def _parse_usage_energy(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetUsageEnergy response.
+    def _parse_usage_energy(
+        data: bytes, time_zone: str | None = None, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Parse MobileGetUsageEnergy.
 
-        Expected fields (float32 or varint):
-          Field 1: grid_to_home_kwh
-          Field 2: solar_to_home_kwh
-          Field 3: battery_to_home_kwh
+        The body is one rolling day of hourly samples, not three totals.
+        Field 2 is packed float32 home/grid kWh. Field 4 is packed float32
+        solar kWh. Field 5 repeats the hour start as a Timestamp. Samples at
+        or after local midnight, and before the next one, are summed. Battery
+        energy is not in this message. A missing or mismatched series stays
+        None. A summed zero is kept.
         """
         result: dict[str, Any] = {
             "grid_to_home_kwh": None,
@@ -757,32 +1063,39 @@ class BasePowerApiClient:
             return result
 
         _LOGGER.debug("UsageEnergy raw hex: %s", data.hex())
+        grid: list[float] = []
+        solar: list[float] | None = None
+        stamps: list[int | None] = []
+        solar_seen = False
+        for field_num, kind, value in _iter_fields(data):
+            if field_num == 2 and kind == "bytes":
+                grid.extend(_packed_floats(value))
+            elif field_num == 2 and kind == "float":
+                grid.append(value)
+            elif field_num == 4 and kind == "bytes":
+                solar_seen = True
+                if solar is None:
+                    solar = []
+                solar.extend(_packed_floats(value))
+            elif field_num == 4 and kind == "float":
+                solar_seen = True
+                if solar is None:
+                    solar = []
+                solar.append(value)
+            elif field_num == 5 and kind == "bytes":
+                stamps.append(_timestamp_seconds(value))
 
-        offset = 0
-        while offset < len(data):
-            if offset >= len(data):
-                break
-            tag = data[offset]
-            field_num = tag >> 3
-            wire_type = tag & 0x07
-            offset += 1
-
-            if wire_type == 5:  # 32-bit (float)
-                if offset + 4 <= len(data):
-                    val = struct.unpack("<f", data[offset : offset + 4])[0]
-                    if field_num == 1:
-                        result["grid_to_home_kwh"] = round(val, 3)
-                    elif field_num == 2:
-                        result["solar_to_home_kwh"] = round(val, 3)
-                    elif field_num == 3:
-                        result["battery_to_home_kwh"] = round(val, 3)
-                offset += 4
-            elif wire_type == 0:
-                _, offset = _decode_varint(data, offset)
-            else:
-                offset = _skip_field(data, offset, wire_type)
-
-        _LOGGER.debug("UsageEnergy parsed: %s", result)
+        start, end = local_day_interval(time_zone, now)
+        result["grid_to_home_kwh"] = _sum_local_day(grid, stamps, start, end)
+        if solar_seen:
+            result["solar_to_home_kwh"] = _sum_local_day(solar or [], stamps, start, end)
+        _LOGGER.debug(
+            "UsageEnergy parsed: %s hours=%s day_start=%s day_end=%s",
+            result,
+            len(stamps),
+            start,
+            end,
+        )
         return result
 
     @staticmethod

@@ -12,6 +12,15 @@ from .const import CLERK_DOMAIN, CLERK_JS_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _mask_secret(value: str | None) -> str:
+    """Keep the last four characters of a credential for a debug log."""
+    if not value:
+        return "none"
+    if len(value) <= 4:
+        return "****"
+    return f"...{value[-4:]}"
+
 # Refresh JWT 10 seconds before expiry
 JWT_REFRESH_BUFFER = 10
 JWT_LIFETIME = 60
@@ -64,8 +73,8 @@ class BasePowerAuth:
 
         async with self._session.post(url, headers=headers) as resp:
             if resp.status != 200:
-                text = await resp.text()
-                _LOGGER.error("Failed to refresh JWT: %s %s", resp.status, text)
+                await resp.read()
+                _LOGGER.error("Failed to refresh JWT: status=%s", resp.status)
                 raise AuthenticationError(
                     f"Clerk token refresh failed: {resp.status}"
                 )
@@ -104,8 +113,8 @@ class BasePowerAuth:
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
-                text = await resp.text()
-                _LOGGER.error("Sign-in initiation failed: %s", text)
+                await resp.read()
+                _LOGGER.error("Sign-in initiation failed: status=%s", resp.status)
                 raise AuthenticationError(f"Sign-in initiation failed: {resp.status}")
 
             # Client token from Authorization response header
@@ -115,10 +124,7 @@ class BasePowerAuth:
             # Fallback: extract token from response body if header is empty
             if not client_token:
                 client_token = body.get("client", {}).get("id", "")
-                _LOGGER.debug(
-                    "Authorization header empty, using client id: %s",
-                    client_token[:20] if client_token else "none",
-                )
+                _LOGGER.debug("Authorization header empty; using the client id from the body")
 
             sign_in_id = body.get("response", {}).get("id")
             email_id = None
@@ -132,8 +138,10 @@ class BasePowerAuth:
                     break
 
             _LOGGER.debug(
-                "Sign-in initiated: id=%s email_id=%s token_len=%d",
-                sign_in_id, email_id, len(client_token) if client_token else 0,
+                "Sign-in initiated: has_id=%s has_email_id=%s token_len=%d",
+                bool(sign_in_id),
+                bool(email_id),
+                len(client_token) if client_token else 0,
             )
 
             return {
@@ -163,11 +171,8 @@ class BasePowerAuth:
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
-                text = await resp.text()
-                _LOGGER.error(
-                    "prepare_first_factor failed: status=%s body=%s",
-                    resp.status, text,
-                )
+                await resp.read()
+                _LOGGER.error("prepare_first_factor failed: status=%s", resp.status)
                 raise AuthenticationError(
                     f"Failed to send verification email: {resp.status}"
                 )
@@ -200,8 +205,8 @@ class BasePowerAuth:
 
         async with session.post(url, headers=headers, data=data) as resp:
             if resp.status != 200:
-                text = await resp.text()
-                raise AuthenticationError(f"OTP verification failed: {text}")
+                await resp.read()
+                raise AuthenticationError(f"OTP verification failed: {resp.status}")
 
             # Updated client token from response header
             new_client_token = resp.headers.get("Authorization", client_token)
@@ -218,35 +223,12 @@ class BasePowerAuth:
                 if isinstance(last_token, dict):
                     session_jwt = last_token.get("jwt")
 
-            # Log what we found (ERROR level so it always shows)
-            _LOGGER.warning(
-                "attempt_first_factor: session_id=%s, token_rotated=%s, "
-                "jwt_in_response=%s, session_keys=%s",
-                session_id,
+            _LOGGER.debug(
+                "attempt_first_factor: session_id=%s token_rotated=%s jwt_in_response=%s",
+                _mask_secret(session_id),
                 new_client_token != client_token,
                 bool(session_jwt),
-                list(sessions[0].keys()) if sessions else "none",
             )
-
-            # Log full response structure for discovery debugging
-            _LOGGER.debug(
-                "attempt_first_factor response keys: %s",
-                list(body.keys()),
-            )
-            if sessions:
-                _LOGGER.debug(
-                    "Session keys: %s", list(sessions[0].keys())
-                )
-                user = sessions[0].get("user", {})
-                _LOGGER.debug("User keys: %s", list(user.keys()))
-                _LOGGER.debug(
-                    "User public_metadata: %s",
-                    user.get("public_metadata"),
-                )
-                _LOGGER.debug(
-                    "User unsafe_metadata: %s",
-                    user.get("unsafe_metadata"),
-                )
 
             return {
                 "session_id": session_id,

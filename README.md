@@ -27,7 +27,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Connectivity** — Whether the gateway is connected
 - **Billing** — Bill amount and due date when the account returns them
 
-Energy split, self-sufficiency, grid amps, and the daily grid totals stay unknown. The current grid response is a voltage series, not those summaries.
+Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from `MobileGetUsageEnergy`. That call uses the numeric service location id. Daily Total (Grid) is the grid sum. Battery to Home stays unknown. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
 
 ## Installation
 
@@ -63,20 +63,20 @@ Energy split, self-sufficiency, grid amps, and the daily grid totals stay unknow
 | Battery Count | Units for the selected capacity | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
 | System Capacity | Capacity selected in the integration options | kWh |
-| Current Power | Live home load, or the latest 15-minute interval when live load is missing | W |
-| Current Interval Energy | Energy for current 15-min period | kWh |
+| Current Power | Live home load, or the latest 15-minute average kW when live load is missing | W |
+| Current Interval Energy | Energy for the current 15-min period (average kW ÷ 4) | kWh |
 | Daily Peak | Highest 15-min interval today | kWh |
 | Daily Low | Lowest 15-min interval today | kWh |
-| Daily Total Energy | Cumulative energy today | kWh |
+| Daily Total Energy | Today's 15-min intervals only, each average kW ÷ 4 | kWh |
 | Intervals Today | Number of data intervals today | — |
 | Grid to Home Energy | Energy drawn from grid | kWh |
 | Solar to Home Energy | Energy from solar panels | kWh |
 | Battery to Home Energy | Energy discharged from battery | kWh |
 | Total Home Energy | Combined home consumption (grid + solar + battery) | kWh |
 | Self-Sufficiency | % of home energy from solar + battery | % |
-| Grid Power (amps) | Not reported by the current grid API | A |
-| Daily Total (Grid) | Not reported by the current grid API | kWh |
-| Daily Average Grid Interval | Not reported by the current grid API | kWh |
+| Grid Power (amps) | Grid kW × 1000 ÷ volts. Negative means export | A |
+| Daily Total (Grid) | Today's grid kWh, the same sum as Grid to Home | kWh |
+| Daily Average Grid Interval | Today's usage total ÷ intervals today | kWh |
 
 ### Binary Sensors
 
@@ -114,13 +114,13 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 | Battery discharge | Battery to Home Energy |
 | Home consumption | Total Home Energy |
 
-Those four sensors stay unknown until the usage-energy call returns a breakdown. Recent usage still fills Current Power, the daily totals, and the interval sensors.
+Grid to Home and Solar to Home fill from today's hourly samples. Battery to Home stays unknown. Recent usage fills Current Power, the daily totals, and the interval sensors. Daily totals count local-midnight onward, not the whole trailing 24 hours.
 
 ## Technical Details
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
-- **Polling Interval**: Full refresh every 5 minutes. Grid voltage, outage state, battery percent, backup time, and current power every 60 seconds
+- **Polling**: Service context and grid status every 60 seconds. Recent usage and usage energy every 15 minutes. Dashboard, Wi-Fi, billing, and usage cycles every 6 hours, and again on startup or when the numeric location id is missing. About 129 calls an hour, down from about 216
 - **Battery**: 25, 40, 50, or 80 kWh, set in the integration options. Base Core's nameplate is 39.2 kWh per unit; the integration uses 40 and 80.
 - **Battery %**: `stateOfEnergyRaw` from `MobileGetServiceContext`
 - **Backup Time**: `availableBackup` hours from `MobileGetServiceContext`, at the current home load
@@ -137,15 +137,30 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Grid Power, during an outage.** Still needs a test. Cut grid power at the panel, leave the house on the battery, and force an update. The sensor turns **off** when Base sets the active-outage flag, and also when voltage falls below 50 V. The September test stayed **on** because the request used the address string and the body came back empty. A missing response stays **unknown**. The sensor does not keep the previous "grid is up" reading.
 - **Battery Level.** This reads `stateOfEnergyRaw`. The development account reported 100. The other state-of-energy field is not the percent.
 - **Battery Backup Time.** This reads `availableBackup` hours and should move as the house load changes. The dashboard value 49652 is the numeric service location id, not a backup duration.
-- **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Daily energy still comes from the 15-minute usage series.
+- **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Otherwise the latest 15-minute sample is average kW, and watts are that value times 1000.
 - **Battery Charging while full.** A flat 100% reads off. Confirmed on the development account.
-- **Bill Amount.** The nested sample from issue #6 decodes to $188.53. Compare that with a real Base bill before treating the sensor as the amount due. The unmapped field next to it (33840) is not shown.
-- **Energy split, self-sufficiency, daily grid total.** Still unknown. Usage calls also need the numeric id plus an interval, and that parser is not in this change.
+- **Bill Amount and Bill Due Date.** These stay empty on plans that have no billing info. That is a real empty response, not a failed poll. When a bill is present, compare the amount with a Base invoice before treating it as the amount due. The nested sample from issue #6 decodes to $188.53. The unmapped field next to it (33840) is not shown.
+- **Grid to Home and Solar to Home.** `MobileGetUsageEnergy` uses the numeric service location id and no time fields. `UsageEnergy parsed` should show today's summed grid and solar kWh. Battery to Home stays unknown. A missing series stays unknown.
+- **Daily Total Energy.** It sums 15-minute samples from local midnight onward. Each sample is average kW divided by 4. The previous 24-hour sum was about four times too large.
+- **Daily Total (Grid).** Same today's grid kWh as Grid to Home. Unknown when that sum is missing.
+- **Daily Average Grid Interval.** Today's usage total divided by the number of 15-minute intervals today. Unknown when today has no intervals.
+- **Grid Power (amps).** `power_from_grid_kw * 1000 / voltage_volts` when voltage is above 0. Negative power is export and stays negative. Unknown when either reading is missing.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
 
 ## Changelog
+
+### v1.12.0
+- Usage energy is parsed from the hourly series. Grid to Home, Solar to Home, Total Home Energy, Self-Sufficiency, and Daily Total (Grid) use today's samples. Battery to Home stays unknown.
+- Only `MobileGetUsageEnergy` sends the numeric service location id. Recent usage, billing, usage cycles, and Wi-Fi keep the address string.
+- Recent usage values are average kW, not kWh. Watts are that value times 1000, interval energy is the value divided by 4, and the daily total counts only today's intervals. The old math was about four times too high.
+- Daily Average Grid Interval is today's usage total divided by the number of 15-minute intervals. Grid Power (amps) is grid kilowatts times 1000 divided by voltage. A negative value is export.
+- The current billing cycle start is parsed. Its end, the server clock at request time, is not used to decide which cycle is current.
+- gRPC status is read from the trailer frame in the response body as well as from the headers.
+- The Clerk session id is no longer written to the log in full.
+- Polling is tiered: service context and grid status every 60 seconds, recent usage and usage energy every 15 minutes, and dashboard, Wi-Fi, billing, and usage cycles every 6 hours. About 129 calls an hour instead of about 216.
+- Bill amount and bill due date stay empty on plans that have no billing info. That empty response is expected.
 
 ### v1.11.0
 - Capacity choices are 25, 40, 50, and 80 kWh. Base Core's published size is 39.2 kWh per unit (78.4 for two); the options use those sizes rounded.
