@@ -319,6 +319,15 @@ class BasePowerIntervalCountSensor(BasePowerSensorBase):
             return self.coordinator.data["derived"].get("intervals_today")
         return None
 
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Which API supplied the 15-minute usage and today's energy."""
+        sources = (self.coordinator.data or {}).get("sources") or {}
+        return {
+            "usage_source": sources.get("usage"),
+            "energy_source": sources.get("energy"),
+        }
+
 
 BATTERY_STATUS_MAP = {
     0: "Unknown",

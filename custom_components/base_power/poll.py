@@ -1,9 +1,11 @@
 """Tiered polling for the Base Power API.
 
 The 60-second tier is ServiceContext and GridStatus. The battery snapshot
-runs on every second 60-second poll. The coordinator refresh is the
-15-minute usage tier and does not repeat the 60-second calls. Dashboard,
-Wi-Fi, billing, usage cycles, and the billing cycle are the 6-hour tier.
+runs every 10 minutes, and on every 60-second poll while something points
+to an outage. The coordinator refresh is the 15-minute usage tier: the v2
+daily overview, with RecentUsage and UsageEnergy only as fallbacks. It does
+not repeat the 60-second calls. Dashboard, Wi-Fi, billing, usage cycles,
+and the billing cycle are the 6-hour tier.
 """
 
 from __future__ import annotations
@@ -23,9 +25,11 @@ _LOGGER = logging.getLogger(__name__)
 
 FAST_METHODS = ("MobileGetServiceContext", "MobileGetGridStatus")
 SNAPSHOT_METHODS = ("GetSnapshot",)
-# The snapshot runs on every Nth 60-second poll.
-SNAPSHOT_EVERY_FAST_POLLS = 2
-USAGE_METHODS = ("MobileGetRecentUsage", "MobileGetUsageEnergy", "GetDailyOverview")
+# While everything looks normal the snapshot runs on every Nth 60-second poll.
+SNAPSHOT_EVERY_FAST_POLLS = 10
+USAGE_METHODS = ("GetDailyOverview",)
+# Called only when the overview fails or is missing that data.
+USAGE_FALLBACK_METHODS = ("MobileGetRecentUsage", "MobileGetUsageEnergy")
 SLOW_METHODS = (
     "MobileGetDashboardRoot",
     "MobileGetWifiMetrics",
@@ -84,6 +88,9 @@ class PollState:
         self.billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
         self.cycles: dict[str, Any] = {"asset_id": None, "cycle_start": None}
         self.overview: dict[str, Any] = empty_overview()
+        # "overview" or "legacy" for the last 15-minute usage and today's energy
+        self.usage_source: str | None = None
+        self.energy_source: str | None = None
         self.billing_cycle: dict[str, Any] = empty_billing_cycle()
 
     def slow_due(self, now: float, *, first: bool) -> bool:
@@ -191,37 +198,57 @@ async def refresh_usage(
     address_id: str,
     time_zone: str | None,
 ) -> None:
-    """Refresh recent usage, usage energy, and the daily overview.
+    """Refresh the daily overview. Fall back to the older calls per piece.
 
+    RecentUsage runs only when the overview has no 15-minute samples.
+    UsageEnergy runs only when it has no hourly samples for today.
     Failures keep the previous data.
     """
-    try:
-        usage = await api.get_recent_usage(address_id)
-    except AuthenticationError:
-        raise
-    except Exception as err:
-        _LOGGER.debug("RecentUsage fetch failed: %s", err)
-    else:
-        if usage:
-            state.usage = usage
-    try:
-        energy = await api.get_usage_energy(
-            address_id,
-            numeric_service_location_id=state.numeric_id,
-            time_zone=time_zone,
-        )
-    except AuthenticationError:
-        raise
-    except Exception as err:
-        _LOGGER.debug("UsageEnergy fetch failed: %s", err)
-    else:
-        state.energy = _keep(state.energy, energy)
+    overview: dict[str, Any] | None = None
     try:
         overview = await api.get_daily_overview(address_id, time_zone)
     except AuthenticationError:
         raise
     except Exception as err:
         _LOGGER.debug("DailyOverview fetch failed: %s", err)
+    if overview and overview.get("available"):
+        state.overview = overview
     else:
-        if overview and overview.get("available"):
-            state.overview = overview
+        overview = None
+
+    home_power = (overview or {}).get("home_power") or []
+    if home_power:
+        state.usage = home_power
+        state.usage_source = "overview"
+    else:
+        try:
+            usage = await api.get_recent_usage(address_id)
+        except AuthenticationError:
+            raise
+        except Exception as err:
+            _LOGGER.debug("RecentUsage fetch failed: %s", err)
+        else:
+            if usage:
+                state.usage = usage
+                state.usage_source = "legacy"
+
+    energy_today = (overview or {}).get("energy_today")
+    if energy_today:
+        state.energy = energy_today
+        state.energy_source = "overview"
+    else:
+        try:
+            energy = await api.get_usage_energy(
+                address_id,
+                numeric_service_location_id=state.numeric_id,
+                time_zone=time_zone,
+            )
+        except AuthenticationError:
+            raise
+        except Exception as err:
+            _LOGGER.debug("UsageEnergy fetch failed: %s", err)
+        else:
+            kept = _keep(state.energy, energy)
+            if kept is energy:
+                state.energy_source = "legacy"
+            state.energy = kept

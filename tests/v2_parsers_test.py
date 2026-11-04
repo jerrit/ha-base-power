@@ -224,3 +224,39 @@ def test_request_encoding():
     assert v2.encode_address_request("ABC").hex() == "0a03414243"
     # AccountReference {1: "ABC", 2: ACCOUNT_TYPE_ENERGY}
     assert v2.encode_billing_cycle_request("ABC").hex() == "0a070a034142431001"
+
+
+def test_overview_home_power_matches_recent_usage_shape():
+    body = msg(1, ts(1, DAY_START + 900) + dbl(2, 0.9565)) + msg(1, ts(1, DAY_START) + dbl(2, 0.8081))
+    parsed = v2.parse_daily_overview(body, DAY_START, DAY_END)
+    assert parsed["home_power"] == [
+        {"timestamp": DAY_START, "kwh": 0.202, "watts": 808},
+        {"timestamp": DAY_START + 900, "kwh": 0.239, "watts": 956},
+    ]
+
+
+def test_overview_energy_today_sums_hourly_samples_in_the_local_day():
+    hour = lambda start, home, solar=None: msg(  # noqa: E731
+        4, ts(1, start) + dbl(2, home) + (dbl(3, solar) if solar is not None else b"")
+    )
+    body = hour(DAY_START - 3600, 9.0) + hour(DAY_START, 0.9109) + hour(DAY_START + 3600, 0.7781, 0.25)
+    parsed = v2.parse_daily_overview(body, DAY_START, DAY_END)
+    assert parsed["energy_today"] == {
+        "grid_to_home_kwh": 1.689,
+        "solar_to_home_kwh": 0.25,
+        "battery_to_home_kwh": None,
+    }
+
+
+def test_overview_without_hourly_samples_today_has_no_energy_today():
+    body = msg(4, ts(1, DAY_START - 3600) + dbl(2, 9.0))
+    assert v2.parse_daily_overview(body, DAY_START, DAY_END)["energy_today"] is None
+
+
+def test_recent_grid_voltage_uses_the_latest_sample():
+    body = msg(1, ts(1, 200) + dbl(2, 244.8)) + msg(1, ts(1, 100) + dbl(2, 240.0))
+    parsed = v2.parse_recent_grid_voltage(body)
+    assert parsed == {"available": True, "has_gateway": None, "voltage_volts": 244.8, "voltage_samples": 2}
+    assert v2.parse_recent_grid_voltage(b"")["voltage_volts"] is None
+    # A sample at 0 V is a real reading (proto3 leaves the field out).
+    assert v2.parse_recent_grid_voltage(msg(1, ts(1, 300)))["voltage_volts"] == 0.0

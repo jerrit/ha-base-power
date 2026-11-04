@@ -652,6 +652,18 @@ class BasePowerApiClient:
         )
         return api_v2.parse_daily_overview(data, start, end)
 
+    async def get_recent_grid_voltage(self, address_id: str) -> dict[str, Any]:
+        """Grid voltage from the v2 API. Fallback when MobileGetGridStatus is empty."""
+        from . import api_v2
+
+        data = await self._call(
+            "GetRecentGridVoltage",
+            api_v2.encode_address_request(address_id),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.UsageService",
+        )
+        return api_v2.parse_recent_grid_voltage(data)
+
     async def get_current_billing_cycle(self, address_id: str) -> dict[str, Any]:
         """Bill so far and projected bill for the energy account."""
         from . import api_v2

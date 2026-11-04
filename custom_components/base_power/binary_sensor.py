@@ -139,6 +139,8 @@ class BasePowerGridStatusSensor(BasePowerBinarySensorBase):
             attributes["voltage_volts"] = round(float(grid["voltage_volts"]), 1)
         if grid.get("is_active_outage") is not None:
             attributes["active_outage"] = bool(grid["is_active_outage"])
+        if grid.get("voltage_source") is not None:
+            attributes["voltage_source"] = grid["voltage_source"]
         return attributes
 
 

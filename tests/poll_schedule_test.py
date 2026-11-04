@@ -114,25 +114,28 @@ class RecordingApi:
         return await self._hit(
             "GetDailyOverview",
             {"available": True, "energy_mix_24h": None, "grid_support": [],
-             "cost_today_cents": None, "cost_currency": None},
+             "cost_today_cents": None, "cost_currency": None,
+             "home_power": [{"timestamp": 1, "kwh": 1.5, "watts": 1000}],
+             "energy_today": {"grid_to_home_kwh": 4.0, "solar_to_home_kwh": 0.0,
+                              "battery_to_home_kwh": None}},
         )
 
     async def get_current_billing_cycle(self, address):
         return await self._hit("GetCurrentBillingCycle", {"net_accrued_cents": 500})
 
 
-def test_steady_state_is_under_170_calls_per_hour():
+def test_steady_state_is_under_135_calls_per_hour():
     per_hour = _poll.steady_state_calls_per_hour()
     fast = (3600 / GRID_SCAN_INTERVAL_SECONDS) * len(FAST_METHODS)
     snapshot = 3600 / GRID_SCAN_INTERVAL_SECONDS / _poll.SNAPSHOT_EVERY_FAST_POLLS
     usage = (3600 / USAGE_SCAN_INTERVAL_SECONDS) * len(USAGE_METHODS)
     slow = (3600 / SLOW_SCAN_INTERVAL_SECONDS) * len(SLOW_METHODS)
     assert fast == 120
-    assert snapshot == 30
-    assert usage == 12
+    assert snapshot == 6
+    assert usage == 4
     assert abs(slow - 5 / 6) < 1e-9
     assert per_hour == fast + snapshot + usage + slow
-    assert per_hour < 170
+    assert per_hour < 135
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.
     previous = (3600 / 300) * 8 + (3600 / 60) * 2
     assert previous == 216
@@ -187,7 +190,7 @@ def test_one_hour_after_startup_matches_the_tier_counts():
         + snapshot_ticks * len(_poll.SNAPSHOT_METHODS)
         + usage_ticks * len(USAGE_METHODS)
     )
-    assert calls == 162
+    assert calls == 130
 
 
 def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
@@ -203,7 +206,7 @@ def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
     state.wifi = {"scan": {"Home": 10}, "ssid": "Home", "signal": 10, "connected": True}
 
     api = RecordingApi(
-        fail=set(SLOW_METHODS) | set(USAGE_METHODS)
+        fail=set(SLOW_METHODS) | set(USAGE_METHODS) | set(_poll.USAGE_FALLBACK_METHODS)
     )
 
     async def check() -> None:
@@ -251,6 +254,10 @@ def test_empty_usage_poll_does_not_replace_a_saved_series():
     }
 
     class EmptyApi(RecordingApi):
+        async def get_daily_overview(self, address, time_zone=None):
+            self.calls.append("GetDailyOverview")
+            return {"available": True, "home_power": [], "energy_today": None}
+
         async def get_recent_usage(self, address):
             self.calls.append("MobileGetRecentUsage")
             return []
@@ -266,3 +273,77 @@ def test_empty_usage_poll_does_not_replace_a_saved_series():
     _run(refresh_usage(EmptyApi(), state, "loc-1", "UTC"))
     assert state.usage[0]["kwh"] == 1.25
     assert state.energy["grid_to_home_kwh"] == 6.0
+
+
+class OverviewApi(RecordingApi):
+    """Overview with selected pieces missing, or failing."""
+
+    def __init__(self, overview, fail=None):
+        super().__init__(fail)
+        self._overview = overview
+
+    async def get_daily_overview(self, address, time_zone=None):
+        return await self._hit("GetDailyOverview", self._overview)
+
+
+def _overview(home_power=None, energy_today=None, available=True):
+    return {"available": available, "energy_mix_24h": None, "grid_support": [],
+            "cost_today_cents": None, "cost_currency": None,
+            "home_power": home_power or [], "energy_today": energy_today}
+
+
+def test_overview_supplies_usage_and_energy_without_legacy_calls():
+    state = PollState()
+    energy = {"grid_to_home_kwh": 6.811, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": None}
+    api = OverviewApi(_overview([{"timestamp": 5, "kwh": 0.2, "watts": 800}], energy))
+    _run(refresh_usage(api, state, "loc-1", "UTC"))
+    assert api.calls == ["GetDailyOverview"]
+    assert state.usage == [{"timestamp": 5, "kwh": 0.2, "watts": 800}]
+    assert state.energy == energy
+    assert (state.usage_source, state.energy_source) == ("overview", "overview")
+
+
+def test_failed_overview_falls_back_to_both_legacy_calls():
+    state = PollState()
+    api = OverviewApi(_overview(), fail={"GetDailyOverview"})
+    _run(refresh_usage(api, state, "loc-1", "UTC"))
+    assert api.calls == ["GetDailyOverview", "MobileGetRecentUsage", "MobileGetUsageEnergy"]
+    assert state.usage[0]["kwh"] == 1.5
+    assert state.energy["grid_to_home_kwh"] == 4.0
+    assert (state.usage_source, state.energy_source) == ("legacy", "legacy")
+
+
+def test_missing_pieces_fall_back_one_at_a_time():
+    energy = {"grid_to_home_kwh": 2.0, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": None}
+    no_usage = OverviewApi(_overview(None, energy))
+    state = PollState()
+    _run(refresh_usage(no_usage, state, "loc-1", "UTC"))
+    assert no_usage.calls == ["GetDailyOverview", "MobileGetRecentUsage"]
+    assert (state.usage_source, state.energy_source) == ("legacy", "overview")
+
+    no_energy = OverviewApi(_overview([{"timestamp": 5, "kwh": 0.2, "watts": 800}], None))
+    state = PollState()
+    _run(refresh_usage(no_energy, state, "loc-1", "UTC"))
+    assert no_energy.calls == ["GetDailyOverview", "MobileGetUsageEnergy"]
+    assert (state.usage_source, state.energy_source) == ("overview", "legacy")
+
+
+def test_unavailable_overview_does_not_replace_the_saved_overview():
+    state = PollState()
+    state.overview = _overview([{"timestamp": 5, "kwh": 0.2, "watts": 800}])
+    api = OverviewApi(_overview(available=False))
+    _run(refresh_usage(api, state, "loc-1", "UTC"))
+    assert state.overview["home_power"][0]["timestamp"] == 5
+
+
+def test_all_usage_sources_failing_keeps_the_previous_data():
+    state = PollState()
+    state.usage = [{"timestamp": 1, "kwh": 2.0, "watts": 800}]
+    state.energy = {"grid_to_home_kwh": 3.0, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": None}
+    api = OverviewApi(_overview(), fail={"GetDailyOverview", *USAGE_FALLBACK_METHODS_ALL})
+    _run(refresh_usage(api, state, "loc-1", "UTC"))
+    assert state.usage[0]["kwh"] == 2.0
+    assert state.energy["grid_to_home_kwh"] == 3.0
+
+
+USAGE_FALLBACK_METHODS_ALL = _poll.USAGE_FALLBACK_METHODS

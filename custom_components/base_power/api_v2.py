@@ -11,6 +11,7 @@ that is present is 0, not unknown.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from .api import _encode_varint, _iter_fields, _timestamp_seconds
@@ -136,7 +137,21 @@ def empty_overview() -> dict[str, Any]:
         "grid_support": [],
         "cost_today_cents": None,
         "cost_currency": None,
+        "home_power": [],
+        "energy_today": None,
     }
+
+
+def _sample(value: bytes) -> tuple[int | None, dict[int, float]]:
+    """Read a sample message: field 1 Timestamp, other fields doubles."""
+    stamp: int | None = None
+    numbers: dict[int, float] = {}
+    for sub_num, sub_kind, sub_value in _iter_fields(value):
+        if sub_num == 1 and sub_kind == "bytes":
+            stamp = _timestamp_seconds(sub_value)
+        elif sub_kind == "double":
+            numbers[sub_num] = sub_value
+    return stamp, numbers
 
 
 def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
@@ -144,17 +159,38 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
 
     The reply is a rolling 24 hours. energy_mix_24h covers that whole window,
     not the local day. cost_today_cents sums hourly grid cost in [start, end).
+
+    home_power has the same shape as MobileGetRecentUsage: 15-minute average
+    kW as kwh (kW / 4) and watts (kW * 1000). energy_today sums the hourly
+    samples in [start, end), the same as MobileGetUsageEnergy. Its
+    grid_to_home_kwh is home load, like the older call's "load" field.
     """
     result = empty_overview()
     if not data:
         return result
     cost_total = 0.0
     cost_seen = False
+    home_kwh = 0.0
+    solar_kwh = 0.0
+    hours_today = 0
     for field_num, kind, value in _iter_fields(data):
         if kind != "bytes":
             continue
         result["available"] = True
-        if field_num == 3:
+        if field_num == 1:
+            stamp, numbers = _sample(value)
+            kw = numbers.get(2, 0.0)
+            if stamp is not None and math.isfinite(kw):
+                result["home_power"].append(
+                    {"timestamp": stamp, "kwh": round(kw / 4, 3), "watts": round(kw * 1000)}
+                )
+        elif field_num == 4:
+            stamp, numbers = _sample(value)
+            if stamp is not None and start <= stamp < end:
+                home_kwh += numbers.get(2, 0.0)
+                solar_kwh += numbers.get(3, 0.0)
+                hours_today += 1
+        elif field_num == 3:
             interval: dict[str, int | None] = {"start": None, "end": None}
             for sub_num, sub_kind, sub_value in _iter_fields(value):
                 if sub_kind == "bytes" and sub_num in (1, 2):
@@ -183,6 +219,13 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
             result["energy_mix_24h"] = mix
     if cost_seen:
         result["cost_today_cents"] = round(cost_total, 2)
+    if hours_today:
+        result["energy_today"] = {
+            "grid_to_home_kwh": round(home_kwh, 3),
+            "solar_to_home_kwh": round(solar_kwh, 3),
+            "battery_to_home_kwh": None,
+        }
+    result["home_power"].sort(key=lambda point: point["timestamp"])
     _LOGGER.debug(
         "DailyOverview parsed: mix=%s grid_support=%d cost_today=%s",
         result["energy_mix_24h"],
@@ -239,3 +282,28 @@ def grid_support_active(intervals: list[dict[str, int | None]], now: int) -> boo
         if start is not None and start <= now and (end is None or now < end):
             return True
     return False
+
+
+def parse_recent_grid_voltage(data: bytes) -> dict[str, Any]:
+    """Parse GetRecentGridVoltageResponse into the MobileGetGridStatus shape.
+
+    Field 1 repeats {1 observed_at, 2 voltage_v}. The latest sample wins.
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "has_gateway": None,
+        "voltage_volts": None,
+        "voltage_samples": 0,
+    }
+    samples: list[tuple[int, float]] = []
+    for field_num, kind, value in _iter_fields(data):
+        if field_num == 1 and kind == "bytes":
+            stamp, numbers = _sample(value)
+            volts = numbers.get(2, 0.0)
+            if stamp is not None and math.isfinite(volts):
+                samples.append((stamp, volts))
+    if samples:
+        result["available"] = True
+        result["voltage_volts"] = max(samples)[1]
+        result["voltage_samples"] = len(samples)
+    return result

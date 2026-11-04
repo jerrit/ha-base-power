@@ -46,7 +46,7 @@ async def _scheduled_refresh_after_grid_polls(polls: int) -> tuple[bool, bool]:
     )
     coordinator._poll = types.SimpleNamespace(numeric_id=123, slow_due=lambda *a, **k: False)
     coordinator.data = {"seed": True}
-    coordinator._fast_polls = 0
+    coordinator._polls_since_snapshot = 0
     coordinator._snapshot = {}
     coordinator.service_location_id = "loc-1"
 
