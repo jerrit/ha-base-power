@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -21,6 +23,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import daily_grid_total_kwh
+from .api_v2 import BATTERY_STATES
 from .const import DOMAIN, CONF_SERVICE_LOCATION_ID
 from .coordinator import BasePowerCoordinator
 
@@ -59,6 +62,17 @@ async def async_setup_entry(
         BasePowerDailyAvgGridSensor(coordinator, entry),
         BasePowerTotalHomeEnergySensor(coordinator, entry),
         BasePowerSelfSufficiencySensor(coordinator, entry),
+        BasePowerBatteryStateSensor(coordinator, entry),
+        BasePowerHardwareSkuSensor(coordinator, entry),
+        BasePowerBackupHours750Sensor(coordinator, entry),
+        BasePowerEnergyMix24hSensor(coordinator, entry, "grid_to_home_kwh", "Grid to Home (24 h)", "mdi:transmission-tower-export"),
+        BasePowerEnergyMix24hSensor(coordinator, entry, "solar_to_home_kwh", "Solar to Home (24 h)", "mdi:solar-power"),
+        BasePowerEnergyMix24hSensor(coordinator, entry, "battery_to_home_kwh", "Battery to Home (24 h)", "mdi:battery-arrow-down"),
+        BasePowerGridSupportEventsSensor(coordinator, entry),
+        BasePowerEnergyCostTodaySensor(coordinator, entry),
+        BasePowerBillingCycleSensor(coordinator, entry, "net_accrued_cents", "Bill to Date", "mdi:cash-clock"),
+        BasePowerBillingCycleSensor(coordinator, entry, "projected_charges_cents", "Projected Bill", "mdi:cash-fast"),
+        BasePowerBillingCycleSensor(coordinator, entry, "solar_credit_cents", "Solar Buyback Credit", "mdi:cash-plus"),
     ]
 
     async_add_entities(entities)
@@ -178,6 +192,15 @@ class BasePowerCapacitySensor(BasePowerSensorBase):
         if self.coordinator.data:
             return self.coordinator.data["derived"].get("capacity_kwh")
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Where the capacity came from, and what the hardware SKU implies."""
+        dashboard = (self.coordinator.data or {}).get("dashboard") or {}
+        return {
+            "capacity_source": dashboard.get("capacity_source"),
+            "detected_capacity_kwh": dashboard.get("detected_capacity_kwh"),
+        }
 
 
 class BasePowerCurrentPowerSensor(BasePowerSensorBase):
@@ -305,6 +328,15 @@ class BasePowerIntervalCountSensor(BasePowerSensorBase):
         if self.coordinator.data:
             return self.coordinator.data["derived"].get("intervals_today")
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Which API supplied the 15-minute usage and today's energy."""
+        sources = (self.coordinator.data or {}).get("sources") or {}
+        return {
+            "usage_source": sources.get("usage"),
+            "energy_source": sources.get("energy"),
+        }
 
 
 BATTERY_STATUS_MAP = {
@@ -626,3 +658,227 @@ class BasePowerSelfSufficiencySensor(BasePowerSensorBase):
         if self.coordinator.data:
             return self.coordinator.data.get("derived", {}).get("self_sufficiency_percent")
         return None
+
+
+def _iso(seconds: int | None) -> str | None:
+    if seconds is None:
+        return None
+    return datetime.fromtimestamp(seconds, UTC).isoformat()
+
+
+class BasePowerBatteryStateSensor(BasePowerSensorBase):
+    """Battery mode from the battery snapshot: on grid, outage, overcurrent."""
+
+    _attr_name = "Battery State"
+    _attr_translation_key = "battery_state"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(BATTERY_STATES.values())
+    _attr_icon = "mdi:home-battery"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_battery_state"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the battery mode."""
+        if self.coordinator.data:
+            return (self.coordinator.data.get("snapshot") or {}).get("state")
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Observation time, off-grid battery percent, and overcurrent limit."""
+        snapshot = (self.coordinator.data or {}).get("snapshot") or {}
+        attributes: dict[str, object] = {}
+        if snapshot.get("observed_at") is not None:
+            attributes["observed_at"] = _iso(snapshot["observed_at"])
+        if snapshot.get("state_of_energy_percent") is not None:
+            attributes["state_of_energy_percent"] = snapshot["state_of_energy_percent"]
+        if snapshot.get("overcurrent_limit_kw") is not None:
+            attributes["overcurrent_limit_kw"] = snapshot["overcurrent_limit_kw"]
+        return attributes
+
+
+class BasePowerBackupHours750Sensor(BasePowerSensorBase):
+    """Backup hours at a 750 W essentials load."""
+
+    _attr_name = "Battery Backup Time (750 W)"
+    _attr_native_unit_of_measurement = UnitOfTime.HOURS
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-clock-outline"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_backup_hours_750w"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return backup hours at 750 W."""
+        if self.coordinator.data:
+            return (self.coordinator.data.get("snapshot") or {}).get("backup_hours_750w")
+        return None
+
+
+class BasePowerEnergyMix24hSensor(BasePowerSensorBase):
+    """One source in Base's rolling 24-hour energy mix.
+
+    No state class: the value is a sliding window, not a daily total, so
+    it must not feed long-term energy statistics.
+    """
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self,
+        coordinator: BasePowerCoordinator,
+        entry: ConfigEntry,
+        key: str,
+        name: str,
+        icon: str,
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._key = key
+        self._attr_name = name
+        self._attr_icon = icon
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_{key}_24h"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return kWh for this source over the last 24 hours."""
+        if self.coordinator.data:
+            mix = (self.coordinator.data.get("overview") or {}).get("energy_mix_24h")
+            if mix is not None:
+                return mix.get(self._key)
+        return None
+
+
+class BasePowerGridSupportEventsSensor(BasePowerSensorBase):
+    """Grid support events in the last 24 hours."""
+
+    _attr_name = "Grid Support Events (24 h)"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:transmission-tower-import"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_grid_support_events_24h"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the number of events."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("derived", {}).get("grid_support_events_24h")
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Start and end of the latest event."""
+        intervals = ((self.coordinator.data or {}).get("overview") or {}).get("grid_support") or []
+        if not intervals:
+            return {}
+        latest = max(intervals, key=lambda item: item.get("start") or 0)
+        return {"last_start": _iso(latest.get("start")), "last_end": _iso(latest.get("end"))}
+
+
+class BasePowerEnergyCostTodaySensor(BasePowerSensorBase):
+    """Estimated grid energy cost today. Empty without Base billing."""
+
+    _attr_name = "Energy Cost Today"
+    _attr_native_unit_of_measurement = "$"
+    _attr_icon = "mdi:currency-usd"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_energy_cost_today"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return today's cost in dollars."""
+        if self.coordinator.data:
+            cents = (self.coordinator.data.get("overview") or {}).get("cost_today_cents")
+            if cents is not None:
+                return round(cents / 100, 2)
+        return None
+
+
+class BasePowerBillingCycleSensor(BasePowerSensorBase):
+    """An amount from the current billing cycle. Empty without Base billing."""
+
+    _attr_native_unit_of_measurement = "$"
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self,
+        coordinator: BasePowerCoordinator,
+        entry: ConfigEntry,
+        key: str,
+        name: str,
+        icon: str,
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._key = key
+        self._attr_name = name
+        self._attr_icon = icon
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_cycle_{key}"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the amount in dollars."""
+        if self.coordinator.data:
+            cents = (self.coordinator.data.get("billing_cycle") or {}).get(self._key)
+            if cents is not None:
+                return round(cents / 100, 2)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Cycle start and how current the data is."""
+        cycle = (self.coordinator.data or {}).get("billing_cycle") or {}
+        attributes: dict[str, object] = {}
+        if cycle.get("service_period_start") is not None:
+            attributes["service_period_start"] = _iso(cycle["service_period_start"])
+        if cycle.get("data_through") is not None:
+            attributes["data_through"] = _iso(cycle["data_through"])
+        return attributes
+
+
+class BasePowerHardwareSkuSensor(BasePowerSensorBase):
+    """Battery hardware SKU from the battery account, with the plan name."""
+
+    _attr_name = "Battery Hardware"
+    _attr_icon = "mdi:barcode"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_hardware_sku"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the hardware SKU."""
+        if self.coordinator.data:
+            return (self.coordinator.data.get("battery_account") or {}).get("hardware_sku")
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Plan name and equipment description."""
+        account = (self.coordinator.data or {}).get("battery_account") or {}
+        attributes: dict[str, object] = {}
+        if account.get("plan_name"):
+            attributes["plan_name"] = account["plan_name"]
+        if account.get("equipment_description"):
+            attributes["equipment_description"] = account["equipment_description"]
+        return attributes
