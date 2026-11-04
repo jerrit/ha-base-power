@@ -74,7 +74,7 @@ Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples f
 | Battery to Home Energy | Energy discharged from battery | kWh |
 | Total Home Energy | Combined home consumption (grid + solar + battery) | kWh |
 | Self-Sufficiency | % of home energy from solar + battery | % |
-| Grid Power (amps) | Grid kW × 1000 ÷ volts. Negative means export | A |
+| Grid Current | Grid kW × 1000 ÷ volts. Negative means export | A |
 | Daily Total (Grid) | Today's grid kWh, the same sum as Grid to Home | kWh |
 | Daily Average Grid Interval | Today's usage total ÷ intervals today | kWh |
 
@@ -144,12 +144,16 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Daily Total Energy.** It sums 15-minute samples from local midnight onward. Each sample is average kW divided by 4. The previous 24-hour sum was about four times too large.
 - **Daily Total (Grid).** Same today's grid kWh as Grid to Home. Unknown when that sum is missing.
 - **Daily Average Grid Interval.** Today's usage total divided by the number of 15-minute intervals today. Unknown when today has no intervals.
-- **Grid Power (amps).** `power_from_grid_kw * 1000 / voltage_volts` when voltage is above 0. Negative power is export and stays negative. Unknown when either reading is missing.
+- **Grid Current.** `power_from_grid_kw * 1000 / voltage_volts` when voltage is above 0. Negative power is export and stays negative. Unknown when either reading is missing.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
 
 ## Changelog
+
+### v1.12.1
+- Energy and daily usage sensors update every 15 minutes again. In 1.12.0 the 60-second grid poll kept restarting the 15-minute refresh timer, so usage only loaded at startup and the daily sensors stayed at 0 after midnight (#13).
+- The amps sensor is renamed from Grid Power to Grid Current. The outage sensor keeps the name Grid Power. Entity IDs and history do not change.
 
 ### v1.12.0
 - Usage energy is parsed from the hourly series. Grid to Home, Solar to Home, Total Home Energy, Self-Sufficiency, and Daily Total (Grid) use today's samples. Battery to Home stays unknown.
@@ -256,6 +260,7 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 - [@jabone](https://github.com/jabone) fixed the nested bill amount, the grid sensor that defaulted to on, and charging while the battery stays full.
 - [@christr](https://github.com/christr) cut power at the panel and showed that Grid Power stayed on.
 - [@Sodium-Hydrogen](https://github.com/Sodium-Hydrogen) reported the usage-cycle error on every poll.
+- [@colforbin13](https://github.com/colforbin13) found that the grid poll kept the 15-minute usage refresh from running, and suggested the fix.
 
 ## Contributing
 
