@@ -1,8 +1,9 @@
 """Tiered polling for the Base Power API.
 
-The 60-second tier is only ServiceContext and GridStatus. The coordinator
-refresh is the 15-minute usage tier and does not repeat those two calls.
-Dashboard, Wi-Fi, billing, and usage cycles are the 6-hour tier.
+The 60-second tier is ServiceContext and GridStatus. The battery snapshot
+runs on every second 60-second poll. The coordinator refresh is the
+15-minute usage tier and does not repeat the 60-second calls. Dashboard,
+Wi-Fi, billing, usage cycles, and the billing cycle are the 6-hour tier.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .api_v2 import empty_billing_cycle, empty_overview
 from .auth import AuthenticationError
 from .const import (
     GRID_SCAN_INTERVAL_SECONDS,
@@ -20,12 +22,16 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 FAST_METHODS = ("MobileGetServiceContext", "MobileGetGridStatus")
-USAGE_METHODS = ("MobileGetRecentUsage", "MobileGetUsageEnergy")
+SNAPSHOT_METHODS = ("GetSnapshot",)
+# The snapshot runs on every Nth 60-second poll.
+SNAPSHOT_EVERY_FAST_POLLS = 2
+USAGE_METHODS = ("MobileGetRecentUsage", "MobileGetUsageEnergy", "GetDailyOverview")
 SLOW_METHODS = (
     "MobileGetDashboardRoot",
     "MobileGetWifiMetrics",
     "MobileGetBillingMetadata",
     "MobileGetUsageCycles",
+    "GetCurrentBillingCycle",
 )
 
 
@@ -40,9 +46,12 @@ def include_fast_on_coordinator_refresh(first: bool) -> bool:
 def steady_state_calls_per_hour() -> float:
     """Average API calls in one hour after startup."""
     fast = (3600 / GRID_SCAN_INTERVAL_SECONDS) * len(FAST_METHODS)
+    snapshot = (3600 / GRID_SCAN_INTERVAL_SECONDS / SNAPSHOT_EVERY_FAST_POLLS) * len(
+        SNAPSHOT_METHODS
+    )
     usage = (3600 / USAGE_SCAN_INTERVAL_SECONDS) * len(USAGE_METHODS)
     slow = (3600 / SLOW_SCAN_INTERVAL_SECONDS) * len(SLOW_METHODS)
-    return fast + usage + slow
+    return fast + snapshot + usage + slow
 
 
 def _empty_energy() -> dict[str, Any]:
@@ -74,6 +83,8 @@ class PollState:
         self.energy: dict[str, Any] = _empty_energy()
         self.billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
         self.cycles: dict[str, Any] = {"asset_id": None, "cycle_start": None}
+        self.overview: dict[str, Any] = empty_overview()
+        self.billing_cycle: dict[str, Any] = empty_billing_cycle()
 
     def slow_due(self, now: float, *, first: bool) -> bool:
         """Slow tier on startup, every 6 hours, or while the numeric id is missing.
@@ -163,6 +174,14 @@ async def refresh_slow(
         _LOGGER.debug("UsageCycles fetch failed: %s", err)
     else:
         state.cycles = _keep(state.cycles, cycles)
+    try:
+        billing_cycle = await api.get_current_billing_cycle(address_id)
+    except AuthenticationError:
+        raise
+    except Exception as err:
+        _LOGGER.debug("CurrentBillingCycle fetch failed: %s", err)
+    else:
+        state.billing_cycle = _keep(state.billing_cycle, billing_cycle)
     state.mark_slow(now)
 
 
@@ -172,7 +191,10 @@ async def refresh_usage(
     address_id: str,
     time_zone: str | None,
 ) -> None:
-    """Refresh recent usage and usage energy. Failures keep the previous series."""
+    """Refresh recent usage, usage energy, and the daily overview.
+
+    Failures keep the previous data.
+    """
     try:
         usage = await api.get_recent_usage(address_id)
     except AuthenticationError:
@@ -194,3 +216,12 @@ async def refresh_usage(
         _LOGGER.debug("UsageEnergy fetch failed: %s", err)
     else:
         state.energy = _keep(state.energy, energy)
+    try:
+        overview = await api.get_daily_overview(address_id, time_zone)
+    except AuthenticationError:
+        raise
+    except Exception as err:
+        _LOGGER.debug("DailyOverview fetch failed: %s", err)
+    else:
+        if overview and overview.get("available"):
+            state.overview = overview

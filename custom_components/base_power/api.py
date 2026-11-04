@@ -465,14 +465,24 @@ class BasePowerApiClient:
             return None
 
     async def _call(
-        self, method: str, payload: bytes = b"", *, optional: bool = False
+        self,
+        method: str,
+        payload: bytes = b"",
+        *,
+        optional: bool = False,
+        service: str = API_SERVICE,
     ) -> bytes:
         """Make a gRPC-Web API call and return the protobuf message."""
-        data, _ok = await self._invoke(method, payload, optional=optional)
+        data, _ok = await self._invoke(method, payload, optional=optional, service=service)
         return data
 
     async def _invoke(
-        self, method: str, payload: bytes = b"", *, optional: bool = False
+        self,
+        method: str,
+        payload: bytes = b"",
+        *,
+        optional: bool = False,
+        service: str = API_SERVICE,
     ) -> tuple[bytes, bool]:
         """Call one RPC.
 
@@ -481,7 +491,7 @@ class BasePowerApiClient:
         Optional calls log that status at debug so a missing contract does not
         fill the error log.
         """
-        url = f"{API_HOST}/{API_SERVICE}/{method}"
+        url = f"{API_HOST}/{service}/{method}"
         headers = {
             "Content-Type": API_CONTENT_TYPE,
             "authorization": self._jwt,
@@ -614,6 +624,45 @@ class BasePowerApiClient:
         )
         data = await self._call("MobileGetUsageCycles", payload, optional=True)
         return self._parse_usage_cycles(data)
+
+    async def get_battery_snapshot(self, address_id: str) -> dict[str, Any]:
+        """Battery mode (on grid, outage, overcurrent), power flow, and backup hours."""
+        from . import api_v2
+
+        data = await self._call(
+            "GetSnapshot",
+            api_v2.encode_address_request(address_id),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.BatteryService",
+        )
+        return api_v2.parse_battery_snapshot(data)
+
+    async def get_daily_overview(
+        self, address_id: str, time_zone: str | None = None
+    ) -> dict[str, Any]:
+        """Rolling 24-hour energy mix, grid support events, and today's cost."""
+        from . import api_v2
+
+        start, end = local_day_interval(time_zone)
+        data = await self._call(
+            "GetDailyOverview",
+            api_v2.encode_address_request(address_id),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.UsageService",
+        )
+        return api_v2.parse_daily_overview(data, start, end)
+
+    async def get_current_billing_cycle(self, address_id: str) -> dict[str, Any]:
+        """Bill so far and projected bill for the energy account."""
+        from . import api_v2
+
+        data = await self._call(
+            "GetCurrentBillingCycle",
+            api_v2.encode_billing_cycle_request(address_id),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.BillingService",
+        )
+        return api_v2.parse_current_billing_cycle(data)
 
     @staticmethod
     def _parse_dashboard_root(data: bytes) -> dict[str, Any]:

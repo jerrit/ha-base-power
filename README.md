@@ -17,7 +17,12 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Backup Time** — Hours of backup at the current home load
 - **System Capacity** — 25, 40, 50, or 80 kWh, chosen in the integration options
 - **Current Power** — Live home load in watts when the service context includes it
-- **Grid Power** — On when grid voltage is at least 100 V and Base has not flagged an outage. Off during an outage or when voltage falls below 50 V. Unknown when that telemetry is missing
+- **Grid Power** — On when grid voltage is at least 100 V and Base has not flagged an outage. Off during an outage, when voltage falls below 50 V, or when the battery reports an off-grid state. Unknown when that telemetry is missing
+- **Battery State** — The battery's mode from Base's newer API: on grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable
+- **Backup Time at 750 W** — Base's essentials-only backup estimate, next to the current-load estimate
+- **24-hour Energy Mix** — Grid, solar, and battery energy to the home over the last 24 hours
+- **Grid Support** — Whether Base is using the battery to support the grid, and how many events ran in the last 24 hours
+- **Costs** — Energy cost today, bill so far, projected bill, and solar buyback credit for accounts billed by Base
 - **Energy Monitoring** — 15-minute interval energy from recent usage, for the Energy Dashboard
 - **Daily Statistics** — Peak, low, total, and interval count from today's usage
 - **Battery Status** — Operating state (Installed, In Service, etc.)
@@ -27,17 +32,16 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Connectivity** — Whether the gateway is connected
 - **Billing** — Bill amount and due date when the account returns them
 
-Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from `MobileGetUsageEnergy`. That call uses the numeric service location id. Daily Total (Grid) is the grid sum. Battery to Home stays unknown. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
+Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from `MobileGetUsageEnergy`. That call uses the numeric service location id. Daily Total (Grid) is the grid sum. Battery to Home is 0 when the 24-hour mix shows no battery energy, and unknown otherwise, because Base does not split battery energy by day. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
 
 ## Installation
 
 ### HACS (Recommended)
 
 1. Open HACS in Home Assistant
-2. Click the three dots menu → **Custom repositories**
-3. Add `https://github.com/jerrit/ha-base-power` with category **Integration**
-4. Click **Install**
-5. Restart Home Assistant
+2. Search for **Base Power**
+3. Click **Download**
+4. Restart Home Assistant
 
 ### Manual
 
@@ -71,12 +75,24 @@ Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples f
 | Intervals Today | Number of data intervals today | — |
 | Grid to Home Energy | Energy drawn from grid | kWh |
 | Solar to Home Energy | Energy from solar panels | kWh |
-| Battery to Home Energy | Energy discharged from battery | kWh |
+| Battery to Home Energy | Energy discharged from battery today. 0 when the 24-hour mix shows none, otherwise unknown | kWh |
 | Total Home Energy | Combined home consumption (grid + solar + battery) | kWh |
 | Self-Sufficiency | % of home energy from solar + battery | % |
 | Grid Current | Grid kW × 1000 ÷ volts. Negative means export | A |
 | Daily Total (Grid) | Today's grid kWh, the same sum as Grid to Home | kWh |
 | Daily Average Grid Interval | Today's usage total ÷ intervals today | kWh |
+| Battery State | On grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable. Attributes show `observed_at`, and off grid, `state_of_energy_percent` and `overcurrent_limit_kw` | — |
+| Battery Backup Time (750 W) | Backup remaining at a 750 W essentials load | hours |
+| Grid to Home (24 h) | Grid energy to the home over the last 24 hours | kWh |
+| Solar to Home (24 h) | Solar energy to the home over the last 24 hours | kWh |
+| Battery to Home (24 h) | Battery energy to the home over the last 24 hours | kWh |
+| Grid Support Events (24 h) | Grid support events in the last 24 hours. Attributes show the latest `last_start` and `last_end` | — |
+| Energy Cost Today | Estimated grid energy cost today. Unknown without Base billing | $ |
+| Bill to Date | Net amount accrued in the current billing cycle. Unknown without Base billing | $ |
+| Projected Bill | Projected consumption charges for the cycle. Unknown without Base billing | $ |
+| Solar Buyback Credit | Solar credit in the current cycle. Unknown without Base billing | $ |
+
+The 24-hour sensors are a sliding window, so they have no state class and do not feed long-term energy statistics. Use the daily sensors for the Energy Dashboard.
 
 ### Binary Sensors
 
@@ -86,6 +102,7 @@ Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples f
 | Solar Connected | Whether solar panels are present |
 | Battery Connected | Gateway is connected |
 | Battery Charging | State of charge is increasing. Off while the battery stays full |
+| Grid Support | On during a grid support event. The event list refreshes every 15 minutes, so it can lag by that much |
 
 ### Select
 
@@ -120,7 +137,7 @@ Grid to Home and Solar to Home fill from today's hourly samples. Battery to Home
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
-- **Polling**: Service context and grid status every 60 seconds. Recent usage and usage energy every 15 minutes. Dashboard, Wi-Fi, billing, and usage cycles every 6 hours, and again on startup or when the numeric location id is missing. About 129 calls an hour, down from about 216
+- **Polling**: Service context and grid status every 60 seconds. The battery snapshot every 2 minutes. Recent usage, usage energy, and the daily overview every 15 minutes. Dashboard, Wi-Fi, billing, usage cycles, and the billing cycle every 6 hours, and again on startup or when the numeric location id is missing. About 163 calls an hour
 - **Battery**: 25, 40, 50, or 80 kWh, set in the integration options. Base Core's nameplate is 39.2 kWh per unit; the integration uses 40 and 80.
 - **Battery %**: `stateOfEnergyRaw` from `MobileGetServiceContext`
 - **Backup Time**: `availableBackup` hours from `MobileGetServiceContext`, at the current home load
@@ -150,6 +167,14 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
 
 ## Changelog
+
+### v1.13.0
+- Base's current app uses a newer API. This release adds calls to it alongside the older API the integration has always used. Base has not announced anything, but the older API may be phased out over time. I'm tracking these changes and will move sensors to the newer API as needed.
+- Adds data from Base's newer `dashboard.mobile.v2` API, which the current app uses: Battery State, Battery Backup Time (750 W), a 24-hour grid, solar, and battery energy mix, Grid Support with an event count, Energy Cost Today, Bill to Date, Projected Bill, and Solar Buyback Credit.
+- Grid Power turns off when the battery snapshot reports an outage, no home power, or overcurrent. The snapshot never turns it on. A failed snapshot call clears the old state.
+- Battery to Home Energy is 0 when the 24-hour mix shows no battery energy, instead of unknown.
+- The cost and bill sensors stay unknown on accounts not billed by Base.
+- About 163 calls an hour, up from about 129. The battery snapshot runs every 2 minutes, the daily overview every 15 minutes, and the billing cycle every 6 hours.
 
 ### v1.12.1
 - Energy and daily usage sensors update every 15 minutes again. In 1.12.0 the 60-second grid poll kept restarting the 15-minute refresh timer, so usage only loaded at startup and the daily sensors stayed at 0 after midnight (#13).
@@ -269,6 +294,8 @@ Contributions are welcome! Please open an issue or PR on [GitHub](https://github
 ## Disclaimer
 
 This integration communicates with Base Power's private API, which may change without notice. Use at your own risk.
+
+Base's current app uses a newer API than the one this integration started on. Since v1.13.0 the integration calls both. The older API may be phased out over time, and sensors will move to the newer API as that happens.
 
 ## License
 

@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import BasePowerApiClient, local_day_interval, summarize_recent_usage
+from .api_v2 import OFF_GRID_STATES, empty_snapshot, grid_support_active
 from .auth import BasePowerAuth, AuthenticationError
 from .const import (
     SCAN_INTERVAL_SECONDS,
@@ -22,7 +23,13 @@ from .const import (
     CONF_BATTERY_CAPACITY,
     resolve_battery_capacity,
 )
-from .poll import PollState, include_fast_on_coordinator_refresh, refresh_slow, refresh_usage
+from .poll import (
+    SNAPSHOT_EVERY_FAST_POLLS,
+    PollState,
+    include_fast_on_coordinator_refresh,
+    refresh_slow,
+    refresh_usage,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +61,8 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.api._empty_service_context(), self.api._empty_grid_voltage()
         )
         self._prev_soc: float | None = None
+        self._snapshot: dict[str, Any] = empty_snapshot()
+        self._fast_polls = 0
 
     @property
     def _numeric_service_location_id(self) -> int | None:
@@ -82,6 +91,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             if include_fast_on_coordinator_refresh(first):
                 self._grid = await self._async_fetch_grid(self._poll.numeric_id)
+                self._snapshot = await self._async_fetch_snapshot()
             return self._compose()
         except AuthenticationError as err:
             raise ConfigEntryAuthFailed from err
@@ -138,6 +148,19 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("GridStatus fetch failed: %s", err)
         return self.api.combine_grid_telemetry(context, voltage)
 
+    async def _async_fetch_snapshot(self) -> dict[str, Any]:
+        """Battery snapshot. A failed call is empty, not the previous state.
+
+        Keeping an old "outage" would hold Grid Power off after the grid returns.
+        """
+        try:
+            return await self.api.get_battery_snapshot(self.service_location_id)
+        except AuthenticationError:
+            raise
+        except Exception as err:
+            _LOGGER.debug("BatterySnapshot fetch failed: %s", err)
+            return empty_snapshot()
+
     def _apply_live_readings(self, derived: dict[str, Any], grid: dict[str, Any]) -> None:
         """Apply state of charge, backup hours, home load, and charging."""
         soc = grid.get("battery_soc_percent")
@@ -189,9 +212,25 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         dashboard["battery_count"] = units
         dashboard["capacity_kwh"] = kwh
 
-        energy = self._poll.energy
+        energy = dict(self._poll.energy)
         usage = self._poll.usage
-        grid = self._grid
+        grid = dict(self._grid)
+        snapshot = self._snapshot
+        overview = self._poll.overview
+        # The snapshot can only turn Grid Power off. Voltage and the outage
+        # flag still decide "on".
+        if snapshot.get("state") in OFF_GRID_STATES:
+            grid["available"] = True
+            grid["grid_is_up"] = False
+        # Base's energy mix covers the last 24 hours. Zero battery energy in
+        # that window means zero today. Any other value cannot be split by day.
+        mix = overview.get("energy_mix_24h")
+        if (
+            energy.get("battery_to_home_kwh") is None
+            and mix is not None
+            and mix.get("battery_to_home_kwh") == 0
+        ):
+            energy["battery_to_home_kwh"] = 0.0
         derived = self._derive_values(dashboard, usage, self._time_zone())
         self._apply_live_readings(derived, grid)
 
@@ -208,6 +247,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             derived["self_sufficiency_percent"] = None
         if not dashboard.get("has_solar") and solar_kwh > 0:
             dashboard["has_solar"] = True
+        intervals = overview.get("grid_support") or []
+        derived["grid_support_events_24h"] = len(intervals) if overview.get("available") else None
+        derived["grid_support_active"] = (
+            grid_support_active(intervals, int(time.time())) if overview.get("available") else None
+        )
 
         return {
             "dashboard": dashboard,
@@ -218,6 +262,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "billing": self._poll.billing,
             "cycles": self._poll.cycles,
             "derived": derived,
+            "snapshot": snapshot,
+            "overview": overview,
+            "billing_cycle": self._poll.billing_cycle,
         }
 
     async def async_poll_grid_status(self, now=None) -> None:
@@ -235,6 +282,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # An empty grid poll stays unknown. Do not keep the previous
             # "grid is up" reading across a miss.
             self._grid = await self._async_fetch_grid(self._poll.numeric_id)
+            self._fast_polls += 1
+            if self._fast_polls % SNAPSHOT_EVERY_FAST_POLLS == 0:
+                self._snapshot = await self._async_fetch_snapshot()
             # Do not use async_set_updated_data here. It restarts the
             # 15-minute refresh timer, and a 60-second poll would keep
             # pushing the usage refresh back so it never runs (issue #13).

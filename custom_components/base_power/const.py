@@ -12,13 +12,14 @@ CLERK_DOMAIN = "https://clerk.basepowercompany.com"
 CLERK_JS_VERSION = "5"
 
 # Polling intervals (seconds).
-# Steady state is about 128.7 calls/hour:
+# Steady state is about 162.8 calls/hour:
 #   every 60 s, ServiceContext + GridStatus (120/hour)
-#   every 15 min, RecentUsage + UsageEnergy (8/hour)
-#   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles (~0.7/hour)
+#   every 2 min, the v2 battery snapshot (30/hour)
+#   every 15 min, RecentUsage + UsageEnergy + v2 DailyOverview (12/hour)
+#   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles
+#     + v2 CurrentBillingCycle (~0.8/hour)
 # The coordinator interval is the 15-minute tier. It does not repeat the
-# 60-second grid calls. The old 5-minute full refresh plus the 60-second
-# grid poll was about 216 calls/hour.
+# 60-second grid calls.
 GRID_SCAN_INTERVAL_SECONDS = 60
 USAGE_SCAN_INTERVAL_SECONDS = 15 * 60
 SLOW_SCAN_INTERVAL_SECONDS = 6 * 60 * 60

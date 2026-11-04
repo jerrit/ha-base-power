@@ -46,5 +46,19 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "battery_state": {
+        "state": {
+          "telemetry_unavailable": "Telemetry unavailable",
+          "on_grid": "On grid",
+          "outage": "Outage",
+          "no_home_power": "No home power",
+          "overcurrent": "Overcurrent",
+          "overcurrent_standby": "Overcurrent standby"
+        }
+      }
+    }
   }
 }

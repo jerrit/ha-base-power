@@ -28,6 +28,7 @@ async def async_setup_entry(
         BasePowerBatteryConnectedSensor(coordinator, entry),
         BasePowerGridStatusSensor(coordinator, entry),
         BasePowerBatteryChargingSensor(coordinator, entry),
+        BasePowerGridSupportSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -158,4 +159,27 @@ class BasePowerBatteryChargingSensor(BasePowerBinarySensorBase):
         """Return True if battery SoC is increasing, False if decreasing, None if stable."""
         if self.coordinator.data:
             return self.coordinator.data.get("derived", {}).get("battery_charging")
+        return None
+
+
+class BasePowerGridSupportSensor(BasePowerBinarySensorBase):
+    """On while Base is using the battery to support the grid.
+
+    The event list refreshes every 15 minutes, so this can lag by that much.
+    """
+
+    _attr_name = "Grid Support"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_icon = "mdi:transmission-tower-import"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_grid_support"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True during a grid support event."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("derived", {}).get("grid_support_active")
         return None

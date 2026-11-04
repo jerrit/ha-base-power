@@ -70,7 +70,9 @@ class RecordingClient(BasePowerApiClient):
         self._responses = list(responses)
         self.calls: list[tuple[str, bytes, bool]] = []
 
-    async def _invoke(self, method: str, payload: bytes = b"", *, optional: bool = False):
+    async def _invoke(
+        self, method: str, payload: bytes = b"", *, optional: bool = False, service: str = ""
+    ):
         self.calls.append((method, bytes(payload), optional))
         item = self._responses.pop(0)
         if isinstance(item, Exception):

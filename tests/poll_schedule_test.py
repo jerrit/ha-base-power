@@ -110,17 +110,29 @@ class RecordingApi:
     async def get_grid_status(self, numeric_id):
         return await self._hit("MobileGetGridStatus", {"voltage_volts": 245.0})
 
+    async def get_daily_overview(self, address, time_zone=None):
+        return await self._hit(
+            "GetDailyOverview",
+            {"available": True, "energy_mix_24h": None, "grid_support": [],
+             "cost_today_cents": None, "cost_currency": None},
+        )
 
-def test_steady_state_is_under_130_calls_per_hour():
+    async def get_current_billing_cycle(self, address):
+        return await self._hit("GetCurrentBillingCycle", {"net_accrued_cents": 500})
+
+
+def test_steady_state_is_under_170_calls_per_hour():
     per_hour = _poll.steady_state_calls_per_hour()
     fast = (3600 / GRID_SCAN_INTERVAL_SECONDS) * len(FAST_METHODS)
+    snapshot = 3600 / GRID_SCAN_INTERVAL_SECONDS / _poll.SNAPSHOT_EVERY_FAST_POLLS
     usage = (3600 / USAGE_SCAN_INTERVAL_SECONDS) * len(USAGE_METHODS)
     slow = (3600 / SLOW_SCAN_INTERVAL_SECONDS) * len(SLOW_METHODS)
     assert fast == 120
-    assert usage == 8
-    assert slow == 4 / 6
-    assert per_hour == fast + usage + slow
-    assert per_hour < 130
+    assert snapshot == 30
+    assert usage == 12
+    assert abs(slow - 5 / 6) < 1e-9
+    assert per_hour == fast + snapshot + usage + slow
+    assert per_hour < 170
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.
     previous = (3600 / 300) * 8 + (3600 / 60) * 2
     assert previous == 216
@@ -169,8 +181,13 @@ def test_one_hour_after_startup_matches_the_tier_counts():
     assert fast_ticks == 60
     assert usage_ticks == 4
     assert slow_ticks == 0
-    calls = fast_ticks * len(FAST_METHODS) + usage_ticks * len(USAGE_METHODS)
-    assert calls == 128
+    snapshot_ticks = fast_ticks // _poll.SNAPSHOT_EVERY_FAST_POLLS
+    calls = (
+        fast_ticks * len(FAST_METHODS)
+        + snapshot_ticks * len(_poll.SNAPSHOT_METHODS)
+        + usage_ticks * len(USAGE_METHODS)
+    )
+    assert calls == 162
 
 
 def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
