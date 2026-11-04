@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .api_v2 import empty_billing_cycle, empty_overview
+from .api_v2 import empty_battery_account, empty_billing_cycle, empty_overview
 from .auth import AuthenticationError
 from .const import (
     GRID_SCAN_INTERVAL_SECONDS,
@@ -36,6 +36,7 @@ SLOW_METHODS = (
     "MobileGetBillingMetadata",
     "MobileGetUsageCycles",
     "GetCurrentBillingCycle",
+    "GetAccount",
 )
 
 
@@ -92,6 +93,7 @@ class PollState:
         self.usage_source: str | None = None
         self.energy_source: str | None = None
         self.billing_cycle: dict[str, Any] = empty_billing_cycle()
+        self.battery_account: dict[str, Any] = empty_battery_account()
 
     def slow_due(self, now: float, *, first: bool) -> bool:
         """Slow tier on startup, every 6 hours, or while the numeric id is missing.
@@ -189,6 +191,14 @@ async def refresh_slow(
         _LOGGER.debug("CurrentBillingCycle fetch failed: %s", err)
     else:
         state.billing_cycle = _keep(state.billing_cycle, billing_cycle)
+    try:
+        battery_account = await api.get_battery_account(address_id)
+    except AuthenticationError:
+        raise
+    except Exception as err:
+        _LOGGER.debug("Battery account fetch failed: %s", err)
+    else:
+        state.battery_account = _keep(state.battery_account, battery_account)
     state.mark_slow(now)
 
 

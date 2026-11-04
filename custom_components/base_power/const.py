@@ -12,14 +12,14 @@ CLERK_DOMAIN = "https://clerk.basepowercompany.com"
 CLERK_JS_VERSION = "5"
 
 # Polling intervals (seconds).
-# Steady state is about 130.8 calls/hour:
+# Steady state is about 131 calls/hour:
 #   every 60 s, ServiceContext + GridStatus (120/hour)
 #   every 10 min, the v2 battery snapshot (6/hour). Every 60 s while the
 #     outage flag, voltage, or the last snapshot points to an outage.
 #   every 15 min, the v2 DailyOverview (4/hour). RecentUsage and UsageEnergy
 #     run only when the overview fails or lacks that data.
 #   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles
-#     + v2 CurrentBillingCycle (~0.8/hour)
+#     + v2 CurrentBillingCycle + v2 battery GetAccount (1/hour)
 # The v2 GetRecentGridVoltage runs only when GridStatus has no voltage.
 # The coordinator interval is the 15-minute tier. It does not repeat the
 # 60-second grid calls.
@@ -47,6 +47,11 @@ _BATTERY_CAPACITY_ALIASES = {
     "78.4 kWh (2 Core)": "80 kWh (2 Core)",
 }
 DEFAULT_BATTERY_CAPACITY = "25 kWh (1 unit)"
+# Battery hardware SKU from the v2 battery account → (units, kWh).
+# Only SKUs confirmed on a real account. Add others as users report them.
+HARDWARE_SKU_CAPACITY: dict[str, tuple[int, int]] = {
+    "GRO_SINGLE": (1, 25),
+}
 # Legacy fallback for installs that still store an integer unit count.
 BATTERY_CAPACITY_PER_UNIT_KWH = 25
 DEFAULT_BATTERY_COUNT = 1

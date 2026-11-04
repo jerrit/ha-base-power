@@ -2,7 +2,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/jerrit/ha-base-power?style=flat-square)](https://github.com/jerrit/ha-base-power/releases)
 [![HACS Validation](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml/badge.svg)](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml)
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=flat-square)](https://github.com/hacs/integration)
+[![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg?style=flat-square)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/github/license/jerrit/ha-base-power?style=flat-square)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/jerrit/ha-base-power?style=flat-square)](https://github.com/jerrit/ha-base-power/stargazers)
 [![HA Version](https://img.shields.io/badge/HA-2024.1%2B-blue?style=flat-square&logo=home-assistant)](https://www.home-assistant.io/)
@@ -15,7 +15,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 - **Battery Level** — State of charge from `stateOfEnergyRaw`, updated about once a minute
 - **Backup Time** — Hours of backup at the current home load
-- **System Capacity** — 25, 40, 50, or 80 kWh, chosen in the integration options
+- **System Capacity** — 25, 40, 50, or 80 kWh, chosen in the integration options. When no capacity was ever saved, a known battery hardware SKU fills it in
 - **Current Power** — Live home load in watts when the service context includes it
 - **Grid Power** — On when grid voltage is at least 100 V and Base has not flagged an outage. Off during an outage, when voltage falls below 50 V, or when the battery reports an off-grid state. Unknown when that telemetry is missing
 - **Battery State** — The battery's mode from Base's newer API: on grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable
@@ -32,7 +32,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Connectivity** — Whether the gateway is connected
 - **Billing** — Bill amount and due date when the account returns them
 
-Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from `MobileGetUsageEnergy`. That call uses the numeric service location id. Daily Total (Grid) is the grid sum. Battery to Home is 0 when the 24-hour mix shows no battery energy, and unknown otherwise, because Base does not split battery energy by day. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
+Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from the v2 daily overview (`GetDailyOverview`, which takes the address string). `MobileGetUsageEnergy`, which takes the numeric service location id, runs only when the overview fails or has no hourly samples for today. Daily Total (Grid) is the grid sum. Battery to Home is 0 when the 24-hour mix shows no battery energy, and unknown otherwise, because Base does not split battery energy by day. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
 
 ## Installation
 
@@ -98,7 +98,7 @@ The 24-hour sensors are a sliding window, so they have no state class and do not
 
 | Entity | Description |
 |--------|-------------|
-| Grid Power | Grid supply is available. Attributes show `voltage_volts` and `active_outage` |
+| Grid Power | Grid supply is available. Attributes show `voltage_volts`, `active_outage`, `voltage_source`, and `battery_state`. An off-grid `battery_state` turns it off even while voltage and `active_outage` look normal |
 | Solar Connected | Whether solar panels are present |
 | Battery Connected | Gateway is connected |
 | Battery Charging | State of charge is increasing. Off while the battery stays full |
@@ -115,6 +115,7 @@ The 24-hour sensors are a sliding window, so they have no state class and do not
 | Entity | Description | Unit |
 |--------|-------------|------|
 | WiFi Signal | Battery WiFi signal strength | % |
+| Battery Hardware | Hardware SKU from the battery account, for example `GRO_SINGLE`. Attributes show `plan_name` | — |
 | WiFi SSID | Connected WiFi network name | — |
 | Bill Amount | Current billing amount | $ |
 | Bill Due Date | Next bill due date | — |
@@ -179,6 +180,9 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 - Grid voltage gets a fallback: when the older grid status call fails or returns nothing, the newer voltage call fills in.
 - The battery snapshot runs every 10 minutes, and every 60 seconds while the outage flag, voltage, or the last snapshot points to an outage. A failing snapshot call does not speed this up.
 - Intervals Today shows `usage_source` and `energy_source`. Grid Power shows `voltage_source`. Each is `overview`, `legacy`, or `v2`.
+- Battery Hardware shows the battery's hardware SKU and plan name. System Capacity shows `capacity_source` (`option`, `sku`, or `default`) and `detected_capacity_kwh`. A saved capacity option always wins. The SKU fills in only when no capacity was ever saved, and only for a known SKU. `GRO_SINGLE` (one 25 kWh unit) is the only one confirmed so far. If yours shows another SKU, please open an issue with it and your system size.
+- Grid Power shows `battery_state`, so an off state caused by the battery snapshot is visible in its attributes.
+- Hourly energy and cost samples that are not finite numbers are skipped, so one bad hour cannot break the daily sensors.
 - About 131 calls an hour, close to the 129 in 1.12.1, while adding the new data.
 
 ### v1.12.1

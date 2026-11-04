@@ -286,3 +286,69 @@ def test_no_voltage_from_either_api_stays_unknown():
     assert data["grid"]["voltage_volts"] is None
     assert data["grid"]["grid_is_up"] is None
     assert data["sources"]["voltage"] is None
+
+
+def test_missing_home_power_field_does_not_speed_up_the_snapshot():
+    _, api, _, _ = _modules()
+    # A present service context without field 9 parses home_has_power as False.
+    parsed = api.BasePowerApiClient._parse_service_context(b"\x08\x01")
+    assert parsed["home_has_power"] is False
+
+    def no_field_9(fake):
+        fake.context = {"available": True, "is_active_outage": False, "home_has_power": False}
+
+    results = _run_polls(no_field_9, 21)
+    assert _snapshot_polls(results) == [10, 20]
+
+
+def test_grid_power_data_records_the_battery_state_behind_an_off_state():
+    data = _compose("overcurrent", volts=245.0)
+    assert data["grid"]["grid_is_up"] is False
+    assert data["grid"]["battery_state"] == "overcurrent"
+    assert data["grid"]["voltage_volts"] == 245.0
+    assert _compose("on_grid")["grid"]["battery_state"] == "on_grid"
+
+
+def _capacity(options, sku):
+    coordinator_mod, api, v2, poll = _modules()
+
+    async def run():
+        hass = HomeAssistant(str(_ROOT))
+        frame.async_setup(hass)
+        try:
+            coordinator = coordinator_mod.BasePowerCoordinator.__new__(coordinator_mod.BasePowerCoordinator)
+            coordinator.hass = hass
+            coordinator._config_entry = types.SimpleNamespace(options=options)
+            coordinator._prev_soc = None
+            coordinator._poll = poll.PollState()
+            coordinator._poll.battery_account = {"plan_name": None, "hardware_sku": sku,
+                                                 "equipment_description": None}
+            coordinator._grid = _grid(api, volts=245.0)
+            coordinator._snapshot = v2.empty_snapshot()
+            data = coordinator._compose()
+            return data["dashboard"], data["derived"]["capacity_kwh"]
+        finally:
+            await hass.async_stop(force=True)
+
+    return asyncio.run(run())
+
+
+def test_saved_capacity_option_wins_over_the_sku():
+    dashboard, kwh = _capacity({"battery_capacity": "80 kWh (2 Core)"}, "GRO_SINGLE")
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (80, 2, "option")
+    assert dashboard["detected_capacity_kwh"] == 25
+    dashboard, kwh = _capacity({"battery_count_override": 2}, "GRO_SINGLE")
+    assert (kwh, dashboard["capacity_source"]) == (50, "option")
+
+
+def test_known_sku_fills_capacity_when_no_option_was_saved():
+    dashboard, kwh = _capacity({}, "GRO_SINGLE")
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (25, 1, "sku")
+    assert dashboard["hardware_sku"] == "GRO_SINGLE"
+
+
+def test_unknown_or_missing_sku_uses_the_default():
+    for sku in ("SOMETHING_NEW", None):
+        dashboard, kwh = _capacity({}, sku)
+        assert (kwh, dashboard["capacity_source"]) == (25, "default")
+        assert dashboard["detected_capacity_kwh"] is None

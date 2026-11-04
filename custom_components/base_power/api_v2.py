@@ -61,6 +61,7 @@ _POWER_FLOW_FIELDS = {
 _NUMBER_KEYS = ("backup_hours", "backup_hours_750w", "overcurrent_limit_kw")
 
 ACCOUNT_TYPE_ENERGY = 1
+ACCOUNT_TYPE_BATTERY = 2
 
 
 def encode_address_request(address_id: str) -> bytes:
@@ -70,7 +71,10 @@ def encode_address_request(address_id: str) -> bytes:
 
 
 def encode_billing_cycle_request(address_id: str, account_type: int = ACCOUNT_TYPE_ENERGY) -> bytes:
-    """GetCurrentBillingCycleRequest: field 1 is AccountReference {1 address, 2 type}."""
+    """Field 1 is AccountReference {1 address, 2 type}.
+
+    GetCurrentBillingCycleRequest and GetAccountRequest share this shape.
+    """
     reference = encode_address_request(address_id) + b"\x10" + _encode_varint(account_type)
     return b"\x0a" + _encode_varint(len(reference)) + reference
 
@@ -186,9 +190,17 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
                 )
         elif field_num == 4:
             stamp, numbers = _sample(value)
-            if stamp is not None and start <= stamp < end:
-                home_kwh += numbers.get(2, 0.0)
-                solar_kwh += numbers.get(3, 0.0)
+            home = numbers.get(2, 0.0)
+            solar = numbers.get(3, 0.0)
+            # A non-finite sample is dropped, so a bad hour cannot publish NaN.
+            if (
+                stamp is not None
+                and start <= stamp < end
+                and math.isfinite(home)
+                and math.isfinite(solar)
+            ):
+                home_kwh += home
+                solar_kwh += solar
                 hours_today += 1
         elif field_num == 3:
             interval: dict[str, int | None] = {"start": None, "end": None}
@@ -205,7 +217,7 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
                     stamp = _timestamp_seconds(sub_value)
                 elif sub_num == 2 and sub_kind == "double":
                     cents = sub_value
-            if stamp is not None and start <= stamp < end:
+            if stamp is not None and start <= stamp < end and math.isfinite(cents):
                 cost_total += cents
                 cost_seen = True
         elif field_num == 6:
@@ -306,4 +318,38 @@ def parse_recent_grid_voltage(data: bytes) -> dict[str, Any]:
         result["available"] = True
         result["voltage_volts"] = max(samples)[1]
         result["voltage_samples"] = len(samples)
+    return result
+
+
+def empty_battery_account() -> dict[str, Any]:
+    return {"plan_name": None, "hardware_sku": None, "equipment_description": None}
+
+
+def parse_battery_account(data: bytes) -> dict[str, Any]:
+    """Parse GetAccountResponse for the battery account. Reads only the plan.
+
+    account (1) → plan (2) → display_name (1), battery (3) → equipment (1,
+    repeated) → description (1), hardware_sku (2). The reply also has
+    payment details, which are skipped and never logged.
+    """
+    result = empty_battery_account()
+    account = next((v for f, k, v in _iter_fields(data) if f == 1 and k == "bytes"), None)
+    plan = None
+    if account is not None:
+        plan = next((v for f, k, v in _iter_fields(account) if f == 2 and k == "bytes"), None)
+    if plan is None:
+        return result
+    for field_num, kind, value in _iter_fields(plan):
+        if field_num == 1 and kind == "bytes":
+            result["plan_name"] = value.decode("utf-8", errors="replace") or None
+        elif field_num == 3 and kind == "bytes":
+            for sub_num, sub_kind, sub_value in _iter_fields(value):
+                if sub_num == 1 and sub_kind == "bytes" and result["hardware_sku"] is None:
+                    for eq_num, eq_kind, eq_value in _iter_fields(sub_value):
+                        text = eq_value.decode("utf-8", errors="replace") if eq_kind == "bytes" else None
+                        if eq_num == 1 and text:
+                            result["equipment_description"] = text
+                        elif eq_num == 2 and text:
+                            result["hardware_sku"] = text
+    _LOGGER.debug("Battery account plan=%s sku=%s", result["plan_name"], result["hardware_sku"])
     return result

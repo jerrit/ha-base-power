@@ -260,3 +260,38 @@ def test_recent_grid_voltage_uses_the_latest_sample():
     assert v2.parse_recent_grid_voltage(b"")["voltage_volts"] is None
     # A sample at 0 V is a real reading (proto3 leaves the field out).
     assert v2.parse_recent_grid_voltage(msg(1, ts(1, 300)))["voltage_volts"] == 0.0
+
+
+def test_non_finite_hourly_energy_is_dropped():
+    nan = float("nan")
+    hour = lambda start, home: msg(4, ts(1, start) + dbl(2, home))  # noqa: E731
+    only_bad = hour(DAY_START, nan) + hour(DAY_START + 3600, float("inf"))
+    assert v2.parse_daily_overview(only_bad, DAY_START, DAY_END)["energy_today"] is None
+    mixed = hour(DAY_START, nan) + hour(DAY_START + 3600, 0.5)
+    assert v2.parse_daily_overview(mixed, DAY_START, DAY_END)["energy_today"]["grid_to_home_kwh"] == 0.5
+    bad_solar = msg(4, ts(1, DAY_START) + dbl(2, 0.5) + dbl(3, nan))
+    assert v2.parse_daily_overview(bad_solar, DAY_START, DAY_END)["energy_today"] is None
+
+
+def test_non_finite_cost_is_dropped():
+    cost = lambda start, cents: msg(5, ts(1, start) + dbl(2, cents))  # noqa: E731
+    assert v2.parse_daily_overview(cost(DAY_START, float("nan")), DAY_START, DAY_END)["cost_today_cents"] is None
+    body = cost(DAY_START, float("nan")) + cost(DAY_START + 3600, 12.0)
+    assert v2.parse_daily_overview(body, DAY_START, DAY_END)["cost_today_cents"] == 12.0
+
+
+def test_battery_account_reads_plan_and_sku_and_skips_payment_details():
+    equipment = msg(1, msg(1, b"Base battery") + msg(2, b"GRO_SINGLE"))
+    plan = msg(1, b"Single Battery") + msg(3, equipment + num(3, 120))
+    account = msg(1, b"summary") + msg(2, plan) + msg(6, msg(1, b"Visa 4242"))
+    parsed = v2.parse_battery_account(msg(1, account) + msg(2, b"member-123"))
+    assert parsed == {
+        "plan_name": "Single Battery",
+        "hardware_sku": "GRO_SINGLE",
+        "equipment_description": "Base battery",
+    }
+    assert v2.parse_battery_account(b"")["hardware_sku"] is None
+
+
+def test_battery_account_request_uses_the_battery_account_type():
+    assert v2.encode_billing_cycle_request("ABC", v2.ACCOUNT_TYPE_BATTERY).hex() == "0a070a034142431002"

@@ -63,6 +63,7 @@ async def async_setup_entry(
         BasePowerTotalHomeEnergySensor(coordinator, entry),
         BasePowerSelfSufficiencySensor(coordinator, entry),
         BasePowerBatteryStateSensor(coordinator, entry),
+        BasePowerHardwareSkuSensor(coordinator, entry),
         BasePowerBackupHours750Sensor(coordinator, entry),
         BasePowerEnergyMix24hSensor(coordinator, entry, "grid_to_home_kwh", "Grid to Home (24 h)", "mdi:transmission-tower-export"),
         BasePowerEnergyMix24hSensor(coordinator, entry, "solar_to_home_kwh", "Solar to Home (24 h)", "mdi:solar-power"),
@@ -191,6 +192,15 @@ class BasePowerCapacitySensor(BasePowerSensorBase):
         if self.coordinator.data:
             return self.coordinator.data["derived"].get("capacity_kwh")
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Where the capacity came from, and what the hardware SKU implies."""
+        dashboard = (self.coordinator.data or {}).get("dashboard") or {}
+        return {
+            "capacity_source": dashboard.get("capacity_source"),
+            "detected_capacity_kwh": dashboard.get("detected_capacity_kwh"),
+        }
 
 
 class BasePowerCurrentPowerSensor(BasePowerSensorBase):
@@ -840,4 +850,35 @@ class BasePowerBillingCycleSensor(BasePowerSensorBase):
             attributes["service_period_start"] = _iso(cycle["service_period_start"])
         if cycle.get("data_through") is not None:
             attributes["data_through"] = _iso(cycle["data_through"])
+        return attributes
+
+
+class BasePowerHardwareSkuSensor(BasePowerSensorBase):
+    """Battery hardware SKU from the battery account, with the plan name."""
+
+    _attr_name = "Battery Hardware"
+    _attr_icon = "mdi:barcode"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_hardware_sku"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the hardware SKU."""
+        if self.coordinator.data:
+            return (self.coordinator.data.get("battery_account") or {}).get("hardware_sku")
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Plan name and equipment description."""
+        account = (self.coordinator.data or {}).get("battery_account") or {}
+        attributes: dict[str, object] = {}
+        if account.get("plan_name"):
+            attributes["plan_name"] = account["plan_name"]
+        if account.get("equipment_description"):
+            attributes["equipment_description"] = account["equipment_description"]
         return attributes

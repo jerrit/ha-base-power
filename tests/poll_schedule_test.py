@@ -123,6 +123,11 @@ class RecordingApi:
     async def get_current_billing_cycle(self, address):
         return await self._hit("GetCurrentBillingCycle", {"net_accrued_cents": 500})
 
+    async def get_battery_account(self, address):
+        return await self._hit("GetAccount", {"plan_name": "Single Battery",
+                                              "hardware_sku": "GRO_SINGLE",
+                                              "equipment_description": None})
+
 
 def test_steady_state_is_under_135_calls_per_hour():
     per_hour = _poll.steady_state_calls_per_hour()
@@ -133,7 +138,7 @@ def test_steady_state_is_under_135_calls_per_hour():
     assert fast == 120
     assert snapshot == 6
     assert usage == 4
-    assert abs(slow - 5 / 6) < 1e-9
+    assert abs(slow - 1.0) < 1e-9
     assert per_hour == fast + snapshot + usage + slow
     assert per_hour < 135
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.
@@ -347,3 +352,19 @@ def test_all_usage_sources_failing_keeps_the_previous_data():
 
 
 USAGE_FALLBACK_METHODS_ALL = _poll.USAGE_FALLBACK_METHODS
+
+
+def test_slow_tier_reads_the_battery_sku():
+    state = PollState()
+    api = RecordingApi()
+    _run(refresh_slow(api, state, "loc-1", None, now=0))
+    assert "GetAccount" in api.calls
+    assert state.battery_account["hardware_sku"] == "GRO_SINGLE"
+
+
+def test_failed_sku_lookup_keeps_the_previous_sku():
+    state = PollState()
+    state.battery_account = {"plan_name": "Single Battery", "hardware_sku": "GRO_SINGLE",
+                             "equipment_description": None}
+    _run(refresh_slow(RecordingApi(fail={"GetAccount"}), state, "loc-1", None, now=0))
+    assert state.battery_account["hardware_sku"] == "GRO_SINGLE"

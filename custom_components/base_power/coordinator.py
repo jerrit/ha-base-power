@@ -21,6 +21,7 @@ from .const import (
     CONF_WIFI_SSID,
     CONF_BATTERY_COUNT,
     CONF_BATTERY_CAPACITY,
+    HARDWARE_SKU_CAPACITY,
     resolve_battery_capacity,
 )
 from .poll import (
@@ -174,10 +175,13 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         does not add a call every minute.
         """
         grid = self._grid
+        # home_has_power is not a trigger. The service-context parser reads a
+        # missing field as False, so an account that never sends it would
+        # poll the snapshot every minute. The snapshot's own no_home_power
+        # state still speeds this up.
         if (
             grid.get("is_active_outage")
             or grid.get("grid_is_up") is False
-            or grid.get("home_has_power") is False
             or self._snapshot.get("state") in OFF_GRID_STATES
         ):
             return True
@@ -236,16 +240,31 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _compose(self) -> dict[str, Any]:
         """Build coordinator data from the cached tiers and the latest grid."""
         dashboard = dict(self._poll.dashboard)
-        resolved = resolve_battery_capacity(
-            self._config_entry.options.get(CONF_BATTERY_CAPACITY)
-        )
+        options = self._config_entry.options
+        resolved = resolve_battery_capacity(options.get(CONF_BATTERY_CAPACITY))
+        sku = (self._poll.battery_account or {}).get("hardware_sku")
+        detected = HARDWARE_SKU_CAPACITY.get(sku) if sku else None
+        # A saved option always wins. The SKU fills in only when no capacity
+        # was ever saved, and only for SKUs whose size is known.
         if resolved is not None:
             units, kwh = resolved
-        else:
-            units = self._config_entry.options.get(CONF_BATTERY_COUNT, DEFAULT_BATTERY_COUNT)
+            source = "option"
+        elif CONF_BATTERY_COUNT in options:
+            units = options[CONF_BATTERY_COUNT]
             kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
+            source = "option"
+        elif detected is not None:
+            units, kwh = detected
+            source = "sku"
+        else:
+            units = DEFAULT_BATTERY_COUNT
+            kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
+            source = "default"
         dashboard["battery_count"] = units
         dashboard["capacity_kwh"] = kwh
+        dashboard["capacity_source"] = source
+        dashboard["hardware_sku"] = sku
+        dashboard["detected_capacity_kwh"] = detected[1] if detected else None
 
         energy = dict(self._poll.energy)
         usage = self._poll.usage
@@ -254,6 +273,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         overview = self._poll.overview
         # The snapshot can only turn Grid Power off. Voltage and the outage
         # flag still decide "on".
+        grid["battery_state"] = snapshot.get("state")
         if snapshot.get("state") in OFF_GRID_STATES:
             grid["available"] = True
             grid["grid_is_up"] = False
@@ -300,6 +320,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "snapshot": snapshot,
             "overview": overview,
             "billing_cycle": self._poll.billing_cycle,
+            "battery_account": self._poll.battery_account,
             "sources": {
                 "usage": self._poll.usage_source,
                 "energy": self._poll.energy_source,

@@ -10,6 +10,9 @@
 - Grid voltage gets a fallback: when the older grid status call fails or returns nothing, the newer voltage call fills in.
 - The battery snapshot runs every 10 minutes, and every 60 seconds while the outage flag, voltage, or the last snapshot points to an outage. A failing snapshot call does not speed this up.
 - Intervals Today shows `usage_source` and `energy_source`. Grid Power shows `voltage_source`. Each is `overview`, `legacy`, or `v2`.
+- Battery Hardware shows the battery's hardware SKU and plan name. System Capacity shows `capacity_source` (`option`, `sku`, or `default`) and `detected_capacity_kwh`. A saved capacity option always wins. The SKU fills in only when no capacity was ever saved, and only for a known SKU. `GRO_SINGLE` (one 25 kWh unit) is the only one confirmed so far. If yours shows another SKU, please open an issue with it and your system size.
+- Grid Power shows `battery_state`, so an off state caused by the battery snapshot is visible in its attributes.
+- Hourly energy and cost samples that are not finite numbers are skipped, so one bad hour cannot break the daily sensors.
 - About 131 calls an hour, close to the 129 in 1.12.1, while adding the new data.
 
 Restart Home Assistant after updating. The integration keeps the already-loaded code until then.
