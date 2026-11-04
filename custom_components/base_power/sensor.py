@@ -511,9 +511,9 @@ class BasePowerAssetIdSensor(BasePowerSensorBase):
 
 
 class BasePowerGridPowerAmpsSensor(BasePowerSensorBase):
-    """Sensor for current grid power draw (amps)."""
+    """Sensor for grid current draw (amps)."""
 
-    _attr_name = "Grid Power"
+    _attr_name = "Grid Current"
     _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
     _attr_device_class = SensorDeviceClass.CURRENT
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -526,7 +526,7 @@ class BasePowerGridPowerAmpsSensor(BasePowerSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        """Return current grid power in amps."""
+        """Return grid current in amps."""
         if self.coordinator.data:
             return self.coordinator.data.get("grid", {}).get("current_power_amps")
         return None

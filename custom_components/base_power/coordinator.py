@@ -235,7 +235,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # An empty grid poll stays unknown. Do not keep the previous
             # "grid is up" reading across a miss.
             self._grid = await self._async_fetch_grid(self._poll.numeric_id)
-            self.async_set_updated_data(self._compose())
+            # Do not use async_set_updated_data here. It restarts the
+            # 15-minute refresh timer, and a 60-second poll would keep
+            # pushing the usage refresh back so it never runs (issue #13).
+            self.data = self._compose()
+            self.async_update_listeners()
         except AuthenticationError as err:
             _LOGGER.debug("Fast grid poll auth failed: %s", err)
         except Exception as err:
