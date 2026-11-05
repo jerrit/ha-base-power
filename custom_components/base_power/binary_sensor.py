@@ -173,7 +173,9 @@ class BasePowerBatteryChargingSensor(BasePowerBinarySensorBase):
 class BasePowerGridSupportSensor(BasePowerBinarySensorBase):
     """On while Base is using the battery to support the grid.
 
-    The event list refreshes every 15 minutes, so this can lag by that much.
+    On when Base's event list shows an event now, or when the grid is up and
+    the battery is powering the home. The live check runs every 60 seconds.
+    The event list refreshes every 15 minutes and can lag.
     """
 
     _attr_name = "Grid Support"
@@ -191,3 +193,16 @@ class BasePowerGridSupportSensor(BasePowerBinarySensorBase):
         if self.coordinator.data:
             return self.coordinator.data.get("derived", {}).get("grid_support_active")
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, float | str]:
+        """What turned the sensor on, and the battery's live output."""
+        data = self.coordinator.data or {}
+        attributes: dict[str, float | str] = {}
+        source = (data.get("derived") or {}).get("grid_support_source")
+        if source:
+            attributes["detected_by"] = source
+        storage_kw = (data.get("grid") or {}).get("power_from_storage_kw")
+        if isinstance(storage_kw, (int, float)) and not isinstance(storage_kw, bool):
+            attributes["battery_output_kw"] = round(storage_kw, 3)
+        return attributes

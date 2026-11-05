@@ -11,9 +11,16 @@ and the billing cycle are the 6-hour tier.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
-from .api_v2 import empty_battery_account, empty_billing_cycle, empty_overview
+from .api import local_day_interval
+from .api_v2 import (
+    empty_battery_account,
+    empty_billing_cycle,
+    empty_energy_account,
+    empty_overview,
+)
 from .auth import AuthenticationError
 from .const import (
     GRID_SCAN_INTERVAL_SECONDS,
@@ -37,6 +44,7 @@ SLOW_METHODS = (
     "MobileGetUsageCycles",
     "GetCurrentBillingCycle",
     "GetAccount",
+    "ListAccounts",
 )
 
 
@@ -86,6 +94,8 @@ class PollState:
         self.usage: list[dict[str, Any]] = []
         self.wifi: dict[str, Any] = _empty_wifi()
         self.energy: dict[str, Any] = _empty_energy()
+        # Local midnight (Unix seconds) of the day self.energy belongs to.
+        self.energy_day: int | None = None
         self.billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
         self.cycles: dict[str, Any] = {"asset_id": None, "cycle_start": None}
         self.overview: dict[str, Any] = empty_overview()
@@ -94,6 +104,7 @@ class PollState:
         self.energy_source: str | None = None
         self.billing_cycle: dict[str, Any] = empty_billing_cycle()
         self.battery_account: dict[str, Any] = empty_battery_account()
+        self.energy_account: dict[str, Any] = empty_energy_account()
 
     def slow_due(self, now: float, *, first: bool) -> bool:
         """Slow tier on startup, every 6 hours, or while the numeric id is missing.
@@ -199,6 +210,14 @@ async def refresh_slow(
         _LOGGER.debug("Battery account fetch failed: %s", err)
     else:
         state.battery_account = _keep(state.battery_account, battery_account)
+    try:
+        energy_account = await api.get_energy_account(address_id)
+    except AuthenticationError:
+        raise
+    except Exception as err:
+        _LOGGER.debug("Energy account fetch failed: %s", err)
+    else:
+        state.energy_account = _keep(state.energy_account, energy_account)
     state.mark_slow(now)
 
 
@@ -207,13 +226,17 @@ async def refresh_usage(
     state: PollState,
     address_id: str,
     time_zone: str | None,
+    now: datetime | None = None,
 ) -> None:
     """Refresh the daily overview. Fall back to the older calls per piece.
 
     RecentUsage runs only when the overview has no 15-minute samples.
     UsageEnergy runs only when it has no hourly samples for today.
-    Failures keep the previous data.
+    Failures keep the previous data, but never past local midnight: Base
+    posts the first hour of a new day about an hour late, and until then
+    today's energy is 0, not yesterday's total.
     """
+    day_start = local_day_interval(time_zone, now)[0]
     overview: dict[str, Any] | None = None
     try:
         overview = await api.get_daily_overview(address_id, time_zone)
@@ -246,6 +269,7 @@ async def refresh_usage(
     if energy_today:
         state.energy = energy_today
         state.energy_source = "overview"
+        state.energy_day = day_start
     else:
         try:
             energy = await api.get_usage_energy(
@@ -261,4 +285,14 @@ async def refresh_usage(
             kept = _keep(state.energy, energy)
             if kept is energy:
                 state.energy_source = "legacy"
+                state.energy_day = day_start
             state.energy = kept
+
+    if state.energy_day is not None and state.energy_day < day_start:
+        state.energy = {
+            "grid_to_home_kwh": 0.0,
+            "solar_to_home_kwh": 0.0,
+            "battery_to_home_kwh": None,
+        }
+        state.energy_source = "day_start"
+        state.energy_day = day_start

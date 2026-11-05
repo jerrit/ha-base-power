@@ -128,6 +128,13 @@ class RecordingApi:
                                               "hardware_sku": "GRO_SINGLE",
                                               "equipment_description": None})
 
+    async def get_energy_account(self, address):
+        return await self._hit("ListAccounts", {"due_at": 1_795_132_800, "amount_due_cents": 500,
+                                                "past_due": False,
+                                                "outstanding_balance_cents": 500,
+                                                "next_bill_date": None,
+                                                "next_autopay_date": None})
+
 
 def test_steady_state_is_under_135_calls_per_hour():
     per_hour = _poll.steady_state_calls_per_hour()
@@ -138,7 +145,7 @@ def test_steady_state_is_under_135_calls_per_hour():
     assert fast == 120
     assert snapshot == 6
     assert usage == 4
-    assert abs(slow - 1.0) < 1e-9
+    assert abs(slow - 7 / 6) < 1e-9
     assert per_hour == fast + snapshot + usage + slow
     assert per_hour < 135
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.
@@ -368,3 +375,76 @@ def test_failed_sku_lookup_keeps_the_previous_sku():
                              "equipment_description": None}
     _run(refresh_slow(RecordingApi(fail={"GetAccount"}), state, "loc-1", None, now=0))
     assert state.battery_account["hardware_sku"] == "GRO_SINGLE"
+
+
+def test_slow_tier_reads_the_bill_due_date():
+    state = PollState()
+    api = RecordingApi()
+    _run(refresh_slow(api, state, "loc-1", None, now=0))
+    assert "ListAccounts" in api.calls
+    assert state.energy_account["due_at"] == 1_795_132_800
+
+
+def test_failed_account_list_keeps_the_previous_due_date():
+    state = PollState()
+    state.energy_account = dict(state.energy_account, due_at=1_795_132_800)
+    _run(refresh_slow(RecordingApi(fail={"ListAccounts"}), state, "loc-1", None, now=0))
+    assert state.energy_account["due_at"] == 1_795_132_800
+
+
+# --- midnight reset -----------------------------------------------------------
+
+
+def _at(hour, minute, day=5):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime(2026, 11, day, hour, minute, tzinfo=ZoneInfo("America/Chicago"))
+
+
+class NoTodayApi(OverviewApi):
+    """Overview works but has no hours for today. The older call has none either."""
+
+    async def get_usage_energy(self, address, numeric_service_location_id=None, time_zone=None):
+        return await self._hit("MobileGetUsageEnergy", {
+            "grid_to_home_kwh": None, "solar_to_home_kwh": None, "battery_to_home_kwh": None})
+
+
+def test_todays_energy_starts_at_zero_after_midnight():
+    tz = "America/Chicago"
+    state = PollState()
+    yesterday = {"grid_to_home_kwh": 33.946, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": None}
+    _run(refresh_usage(OverviewApi(_overview(None, yesterday)), state, "loc-1", tz, _at(23, 9, day=4)))
+    assert state.energy["grid_to_home_kwh"] == 33.946
+
+    # 12:15 AM: Base has not posted the new day's first hour yet.
+    _run(refresh_usage(NoTodayApi(_overview()), state, "loc-1", tz, _at(0, 15)))
+    assert state.energy["grid_to_home_kwh"] == 0.0
+    assert state.energy["solar_to_home_kwh"] == 0.0
+    assert state.energy_source == "day_start"
+
+    # Still empty at 12:45 AM: stays 0, does not bring back yesterday.
+    _run(refresh_usage(NoTodayApi(_overview()), state, "loc-1", tz, _at(0, 45)))
+    assert state.energy["grid_to_home_kwh"] == 0.0
+
+    # 1:10 AM: the first hour arrives.
+    today = {"grid_to_home_kwh": 0.546, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": None}
+    _run(refresh_usage(OverviewApi(_overview(None, today)), state, "loc-1", tz, _at(1, 10)))
+    assert state.energy == today
+    assert state.energy_source == "overview"
+
+
+def test_failed_refresh_during_the_day_keeps_the_last_value():
+    tz = "America/Chicago"
+    state = PollState()
+    energy = {"grid_to_home_kwh": 12.0, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": None}
+    _run(refresh_usage(OverviewApi(_overview(None, energy)), state, "loc-1", tz, _at(14, 0)))
+    _run(refresh_usage(NoTodayApi(_overview(), fail={"GetDailyOverview"}), state, "loc-1", tz, _at(14, 15)))
+    assert state.energy["grid_to_home_kwh"] == 12.0
+
+
+def test_failed_first_refresh_stays_unknown_not_zero():
+    state = PollState()
+    _run(refresh_usage(NoTodayApi(_overview(), fail={"GetDailyOverview"}), state, "loc-1",
+                       "America/Chicago", _at(0, 15)))
+    assert state.energy["grid_to_home_kwh"] is None

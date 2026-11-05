@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import importlib
 import sys
 import types
@@ -36,16 +37,26 @@ def _modules():
     return coordinator, api, v2, poll
 
 
-def _grid(api, *, volts: float | None, outage: bool = False):
+def _grid(api, *, volts: float | None, outage: bool = False, storage_kw=None):
     context = api.BasePowerApiClient._empty_service_context()
-    context.update(available=True, is_active_outage=outage)
+    context.update(available=True, is_active_outage=outage, power_from_storage_kw=storage_kw)
     voltage = api.BasePowerApiClient._empty_grid_voltage()
     if volts is not None:
         voltage.update(available=True, voltage_volts=volts)
     return api.BasePowerApiClient.combine_grid_telemetry(context, voltage)
 
 
-def _compose(snapshot_state=None, *, volts=245.0, mix=None, energy_battery=None, fail_snapshot=False):
+def _compose(
+    snapshot_state=None,
+    *,
+    volts=245.0,
+    mix=None,
+    energy_battery=None,
+    energy_solar=0.0,
+    fail_snapshot=False,
+    storage_kw=None,
+    support_intervals=None,
+):
     coordinator_mod, api, v2, poll = _modules()
 
     async def run():
@@ -61,14 +72,16 @@ def _compose(snapshot_state=None, *, volts=245.0, mix=None, energy_battery=None,
             coordinator._poll = poll.PollState()
             coordinator._poll.energy = {
                 "grid_to_home_kwh": 6.8,
-                "solar_to_home_kwh": 0.0,
+                "solar_to_home_kwh": energy_solar,
                 "battery_to_home_kwh": energy_battery,
             }
             overview = v2.empty_overview()
             if mix is not None:
                 overview.update(available=True, energy_mix_24h=mix)
+            if support_intervals is not None:
+                overview.update(available=True, grid_support=support_intervals)
             coordinator._poll.overview = overview
-            coordinator._grid = _grid(api, volts=volts)
+            coordinator._grid = _grid(api, volts=volts, storage_kw=storage_kw)
             coordinator.service_location_id = "loc-1"
             snapshot = v2.empty_snapshot()
             if snapshot_state:
@@ -124,6 +137,18 @@ def test_total_home_energy_does_not_change_when_battery_is_filled_with_zero():
     zero = {"grid_to_home_kwh": 32.0, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": 0.0}
     data = _compose("on_grid", mix=zero)
     assert data["derived"]["total_home_kwh"] == 6.8
+
+
+def test_total_home_energy_does_not_count_solar_twice():
+    # Home load is 6.8 kWh, 2.0 of it from solar. The total stays 6.8.
+    data = _compose("on_grid", energy_solar=2.0, energy_battery=1.4)
+    assert data["derived"]["total_home_kwh"] == 6.8
+    assert data["derived"]["self_sufficiency_percent"] == 50.0
+
+
+def test_self_sufficiency_caps_at_100_when_solar_exports():
+    data = _compose("on_grid", energy_solar=9.0)
+    assert data["derived"]["self_sufficiency_percent"] == 100.0
 
 
 # --- snapshot cadence and voltage fallback -------------------------------------
@@ -345,6 +370,8 @@ def test_known_sku_fills_capacity_when_no_option_was_saved():
     dashboard, kwh = _capacity({}, "GRO_SINGLE")
     assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (25, 1, "sku")
     assert dashboard["hardware_sku"] == "GRO_SINGLE"
+    dashboard, kwh = _capacity({}, "GRO_DUAL")
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (50, 2, "sku")
 
 
 def test_unknown_or_missing_sku_uses_the_default():
@@ -352,3 +379,38 @@ def test_unknown_or_missing_sku_uses_the_default():
         dashboard, kwh = _capacity({}, sku)
         assert (kwh, dashboard["capacity_source"]) == (25, "default")
         assert dashboard["detected_capacity_kwh"] is None
+
+
+# --- grid support detection ---------------------------------------------------
+
+
+def test_battery_powering_the_home_on_grid_is_grid_support():
+    # The reported case: app says grid support is active, event list has not caught up.
+    data = _compose("on_grid", storage_kw=5.6, support_intervals=[])
+    assert data["derived"]["grid_support_active"] is True
+    assert data["derived"]["grid_support_source"] == "battery_power"
+    assert data["grid"]["grid_is_up"] is True
+
+
+def test_idle_battery_with_no_event_is_not_grid_support():
+    data = _compose("on_grid", storage_kw=0.05, support_intervals=[])
+    assert data["derived"]["grid_support_active"] is False
+    assert data["derived"]["grid_support_source"] is None
+
+
+def test_battery_during_an_outage_is_not_grid_support():
+    data = _compose("outage", storage_kw=3.0, support_intervals=[])
+    assert data["grid"]["grid_is_up"] is False
+    assert data["derived"]["grid_support_active"] is False
+
+
+def test_event_list_still_turns_grid_support_on():
+    now = int(time.time())
+    data = _compose("on_grid", storage_kw=0.0, support_intervals=[{"start": now - 60, "end": None}])
+    assert data["derived"]["grid_support_active"] is True
+    assert data["derived"]["grid_support_source"] == "event_list"
+
+
+def test_grid_support_is_unknown_without_any_data():
+    data = _compose("on_grid", storage_kw=None)
+    assert data["derived"]["grid_support_active"] is None

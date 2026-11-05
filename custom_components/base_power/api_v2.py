@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import UTC, date, datetime
 from typing import Any
 
 from .api import _encode_varint, _iter_fields, _timestamp_seconds
@@ -140,6 +141,7 @@ def empty_overview() -> dict[str, Any]:
         "energy_mix_24h": None,
         "grid_support": [],
         "cost_today_cents": None,
+        "cost_24h_cents": None,
         "cost_currency": None,
         "home_power": [],
         "energy_today": None,
@@ -162,7 +164,8 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
     """Parse GetDailyOverviewResponse.
 
     The reply is a rolling 24 hours. energy_mix_24h covers that whole window,
-    not the local day. cost_today_cents sums hourly grid cost in [start, end).
+    not the local day. cost_today_cents sums hourly grid cost in [start, end). cost_24h_cents
+    sums every hour in the reply, the window the app's daily overview shows.
 
     home_power has the same shape as MobileGetRecentUsage: 15-minute average
     kW as kwh (kW / 4) and watts (kW * 1000). energy_today sums the hourly
@@ -174,6 +177,8 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
         return result
     cost_total = 0.0
     cost_seen = False
+    cost_24h = 0.0
+    cost_24h_seen = False
     home_kwh = 0.0
     solar_kwh = 0.0
     hours_today = 0
@@ -217,7 +222,12 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
                     stamp = _timestamp_seconds(sub_value)
                 elif sub_num == 2 and sub_kind == "double":
                     cents = sub_value
-            if stamp is not None and start <= stamp < end and math.isfinite(cents):
+            if stamp is None or not math.isfinite(cents):
+                continue
+            # The reply is the last 24 hours, the same window as the app.
+            cost_24h += cents
+            cost_24h_seen = True
+            if start <= stamp < end:
                 cost_total += cents
                 cost_seen = True
         elif field_num == 6:
@@ -231,6 +241,8 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
             result["energy_mix_24h"] = mix
     if cost_seen:
         result["cost_today_cents"] = round(cost_total, 2)
+    if cost_24h_seen:
+        result["cost_24h_cents"] = round(cost_24h, 2)
     if hours_today:
         result["energy_today"] = {
             "grid_to_home_kwh": round(home_kwh, 3),
@@ -296,6 +308,26 @@ def grid_support_active(intervals: list[dict[str, int | None]], now: int) -> boo
     return False
 
 
+# Battery output, in kW, that counts as grid support while the grid is up.
+GRID_SUPPORT_STORAGE_KW = 0.2
+
+
+def live_grid_support(grid_is_up: bool | None, storage_kw: float | None) -> bool | None:
+    """True when the battery powers the home while the grid is up.
+
+    On grid, Base runs the battery only for grid support. During an outage
+    the battery also powers the home, so a down or unknown grid gives None.
+    The threshold skips small readings that are noise, not an event.
+    """
+    if grid_is_up is not True:
+        return None
+    if isinstance(storage_kw, bool) or not isinstance(storage_kw, (int, float)):
+        return None
+    if not math.isfinite(storage_kw):
+        return None
+    return storage_kw >= GRID_SUPPORT_STORAGE_KW
+
+
 def parse_recent_grid_voltage(data: bytes) -> dict[str, Any]:
     """Parse GetRecentGridVoltageResponse into the MobileGetGridStatus shape.
 
@@ -353,3 +385,74 @@ def parse_battery_account(data: bytes) -> dict[str, Any]:
                             result["hardware_sku"] = text
     _LOGGER.debug("Battery account plan=%s sku=%s", result["plan_name"], result["hardware_sku"])
     return result
+
+
+def empty_energy_account() -> dict[str, Any]:
+    return {
+        "due_at": None,
+        "amount_due_cents": None,
+        "past_due": None,
+        "outstanding_balance_cents": None,
+        "next_bill_date": None,
+        "next_autopay_date": None,
+    }
+
+
+def parse_energy_account(data: bytes) -> dict[str, Any]:
+    """Parse ListAccountsResponse and read the energy account's summary.
+
+    accounts (1, repeated AccountSummary): 1 account_type, 5 outstanding
+    balance cents, 7 next autopay date, 8 next bill date, 10 oldest open
+    obligation {3 original amount cents, 4 due_at, 7 past_due}. Timestamps
+    are UTC seconds. All None when there is no energy account, such as a
+    home not billed by Base for energy. No open obligation means nothing is
+    owed, so due_at stays None.
+    """
+    result = empty_energy_account()
+    for field_num, kind, summary in _iter_fields(data):
+        if field_num != 1 or kind != "bytes":
+            continue
+        fields = list(_iter_fields(summary))
+        account_type = next((v for f, k, v in fields if f == 1 and k == "varint"), 0)
+        if account_type != ACCOUNT_TYPE_ENERGY:
+            continue
+        result["outstanding_balance_cents"] = 0
+        result["past_due"] = False
+        for sub_num, sub_kind, value in fields:
+            if sub_num == 5 and sub_kind == "varint":
+                result["outstanding_balance_cents"] = _int64(value)
+            elif sub_num == 7 and sub_kind == "bytes":
+                result["next_autopay_date"] = _timestamp_seconds(value)
+            elif sub_num == 8 and sub_kind == "bytes":
+                result["next_bill_date"] = _timestamp_seconds(value)
+            elif sub_num == 10 and sub_kind == "bytes":
+                for ob_num, ob_kind, ob_value in _iter_fields(value):
+                    if ob_num == 3 and ob_kind == "varint":
+                        result["amount_due_cents"] = _int64(ob_value)
+                    elif ob_num == 4 and ob_kind == "bytes":
+                        result["due_at"] = _timestamp_seconds(ob_value)
+                    elif ob_num == 7 and ob_kind == "varint":
+                        result["past_due"] = bool(ob_value)
+        break
+    _LOGGER.debug(
+        "Energy account due_at=%s past_due=%s next_bill=%s",
+        result["due_at"],
+        result["past_due"],
+        result["next_bill_date"],
+    )
+    return result
+
+
+def local_due_date(seconds: int | None, tz: Any) -> date | None:
+    """Due date as a calendar day.
+
+    A timestamp at exactly midnight UTC is a date with no time, so its UTC
+    day is the due day. Converting it to US time would show the day before.
+    Any other timestamp uses the home's local day.
+    """
+    if seconds is None:
+        return None
+    moment = datetime.fromtimestamp(seconds, UTC)
+    if seconds % 86400 == 0:
+        return moment.date()
+    return moment.astimezone(tz).date()

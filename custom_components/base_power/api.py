@@ -676,6 +676,18 @@ class BasePowerApiClient:
         )
         return api_v2.parse_battery_account(data)
 
+    async def get_energy_account(self, address_id: str) -> dict[str, Any]:
+        """Bill due date and balance for the energy account, from ListAccounts."""
+        from . import api_v2
+
+        data = await self._call(
+            "ListAccounts",
+            api_v2.encode_address_request(address_id),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.BillingService",
+        )
+        return api_v2.parse_energy_account(data)
+
     async def get_current_billing_cycle(self, address_id: str) -> dict[str, Any]:
         """Bill so far and projected bill for the energy account."""
         from . import api_v2

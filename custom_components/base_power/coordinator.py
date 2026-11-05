@@ -12,7 +12,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import BasePowerApiClient, local_day_interval, summarize_recent_usage
-from .api_v2 import OFF_GRID_STATES, empty_snapshot, grid_support_active
+from .api_v2 import OFF_GRID_STATES, empty_snapshot, grid_support_active, live_grid_support
 from .auth import BasePowerAuth, AuthenticationError
 from .const import (
     SCAN_INTERVAL_SECONDS,
@@ -289,14 +289,17 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         derived = self._derive_values(dashboard, usage, self._time_zone())
         self._apply_live_readings(derived, grid)
 
-        grid_kwh = energy.get("grid_to_home_kwh") or 0.0
+        # grid_to_home_kwh is Base's home load: everything the house used,
+        # solar and battery included. Adding solar and battery to it would
+        # count them twice.
+        total_home = energy.get("grid_to_home_kwh") or 0.0
         solar_kwh = energy.get("solar_to_home_kwh") or 0.0
         battery_kwh = energy.get("battery_to_home_kwh") or 0.0
-        total_home = grid_kwh + solar_kwh + battery_kwh
         derived["total_home_kwh"] = round(total_home, 3) if total_home > 0 else None
         if total_home > 0:
+            # Solar can exceed home use when it exports, so cap at 100.
             derived["self_sufficiency_percent"] = round(
-                (solar_kwh + battery_kwh) / total_home * 100, 1
+                min((solar_kwh + battery_kwh) / total_home, 1.0) * 100, 1
             )
         else:
             derived["self_sufficiency_percent"] = None
@@ -304,9 +307,20 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dashboard["has_solar"] = True
         intervals = overview.get("grid_support") or []
         derived["grid_support_events_24h"] = len(intervals) if overview.get("available") else None
-        derived["grid_support_active"] = (
+        scheduled = (
             grid_support_active(intervals, int(time.time())) if overview.get("available") else None
         )
+        live = live_grid_support(grid.get("grid_is_up"), grid.get("power_from_storage_kw"))
+        # The event list can lag by 15 minutes. Live battery power catches
+        # an event within a minute.
+        if scheduled or live:
+            derived["grid_support_active"] = True
+            derived["grid_support_source"] = "battery_power" if live else "event_list"
+        else:
+            derived["grid_support_active"] = (
+                False if scheduled is False or live is False else None
+            )
+            derived["grid_support_source"] = None
 
         return {
             "dashboard": dashboard,
@@ -321,6 +335,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "overview": overview,
             "billing_cycle": self._poll.billing_cycle,
             "battery_account": self._poll.battery_account,
+            "energy_account": self._poll.energy_account,
             "sources": {
                 "usage": self._poll.usage_source,
                 "energy": self._poll.energy_source,

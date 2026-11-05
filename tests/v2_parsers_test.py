@@ -174,11 +174,14 @@ def test_overview_cost_today_sums_only_the_local_day():
     parsed = v2.parse_daily_overview(body, DAY_START, DAY_END)
     assert parsed["cost_today_cents"] == 19.75
     assert parsed["cost_currency"] == "USD"
+    # The 24-hour total counts every hour, including yesterday's.
+    assert parsed["cost_24h_cents"] == 69.75
 
 
 def test_overview_without_cost_samples_today_is_unknown():
     body = msg(5, ts(1, DAY_START - 3600) + dbl(2, 50.0))
     assert v2.parse_daily_overview(body, DAY_START, DAY_END)["cost_today_cents"] is None
+    assert v2.parse_daily_overview(body, DAY_START, DAY_END)["cost_24h_cents"] == 50.0
 
 
 def test_grid_support_intervals_and_active_window():
@@ -295,3 +298,55 @@ def test_battery_account_reads_plan_and_sku_and_skips_payment_details():
 
 def test_battery_account_request_uses_the_battery_account_type():
     assert v2.encode_billing_cycle_request("ABC", v2.ACCOUNT_TYPE_BATTERY).hex() == "0a070a034142431002"
+
+
+# --- energy account (bill due date) -------------------------------------------
+
+
+def _summary(account_type: int, body: bytes = b"") -> bytes:
+    return msg(1, num(1, account_type) + msg(2, b"USD") + num(3, 1) + body)
+
+
+def test_energy_account_reads_the_open_bill():
+    obligation = msg(1, b"ob-1") + num(3, 10359) + ts(4, 1_795_219_200) + num(7, 1)
+    reply = (
+        _summary(v2.ACCOUNT_TYPE_BATTERY, num(5, 999))
+        + _summary(
+            v2.ACCOUNT_TYPE_ENERGY,
+            num(5, 10359) + ts(7, 1_795_132_800) + ts(8, 1_796_000_000) + msg(10, obligation),
+        )
+        + msg(2, b"member")
+    )
+    parsed = v2.parse_energy_account(reply)
+    assert parsed["due_at"] == 1_795_219_200
+    assert parsed["amount_due_cents"] == 10359
+    assert parsed["past_due"] is True
+    assert parsed["outstanding_balance_cents"] == 10359
+    assert parsed["next_autopay_date"] == 1_795_132_800
+    assert parsed["next_bill_date"] == 1_796_000_000
+
+
+def test_paid_up_energy_account_has_no_due_date():
+    parsed = v2.parse_energy_account(_summary(v2.ACCOUNT_TYPE_ENERGY, ts(8, 1_796_000_000)))
+    assert parsed["due_at"] is None
+    assert parsed["past_due"] is False
+    assert parsed["outstanding_balance_cents"] == 0
+    assert parsed["next_bill_date"] == 1_796_000_000
+
+
+def test_no_energy_account_is_all_unknown():
+    # A battery-only home, like a reply seen live: one battery summary.
+    parsed = v2.parse_energy_account(_summary(v2.ACCOUNT_TYPE_BATTERY, num(9, 1)) + msg(2, b"m"))
+    assert parsed == v2.empty_energy_account()
+    assert v2.parse_energy_account(b"") == v2.empty_energy_account()
+
+
+def test_due_date_at_midnight_utc_keeps_its_day():
+    from zoneinfo import ZoneInfo
+
+    chicago = ZoneInfo("America/Chicago")
+    # 2026-11-20 00:00 UTC is Nov 19 in Chicago, but the bill is due Nov 20.
+    assert str(v2.local_due_date(1_795_132_800, chicago)) == "2026-11-20"
+    # 2026-11-20 05:59 UTC is a real moment, still Nov 19 in Chicago.
+    assert str(v2.local_due_date(1_795_132_800 + 5 * 3600 + 59 * 60, chicago)) == "2026-11-19"
+    assert v2.local_due_date(None, chicago) is None
