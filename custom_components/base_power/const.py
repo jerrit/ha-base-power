@@ -19,7 +19,8 @@ CLERK_JS_VERSION = "5"
 #   every 15 min, the v2 DailyOverview (4/hour). RecentUsage and UsageEnergy
 #     run only when the overview fails or lacks that data.
 #   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles
-#     + v2 CurrentBillingCycle + v2 battery GetAccount (1/hour)
+#     + v2 CurrentBillingCycle + v2 battery GetAccount + v2 ListAccounts
+#     (about 1/hour)
 # The v2 GetRecentGridVoltage runs only when GridStatus has no voltage.
 # The coordinator interval is the 15-minute tier. It does not repeat the
 # 60-second grid calls.
@@ -51,6 +52,7 @@ DEFAULT_BATTERY_CAPACITY = "25 kWh (1 unit)"
 # Only SKUs confirmed on a real account. Add others as users report them.
 HARDWARE_SKU_CAPACITY: dict[str, tuple[int, int]] = {
     "GRO_SINGLE": (1, 25),
+    "GRO_DUAL": (2, 50),
 }
 # Legacy fallback for installs that still store an integer unit count.
 BATTERY_CAPACITY_PER_UNIT_KWH = 25

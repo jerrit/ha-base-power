@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -21,9 +22,10 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .api import daily_grid_total_kwh
-from .api_v2 import BATTERY_STATES
+from .api_v2 import BATTERY_STATES, local_due_date
 from .const import DOMAIN, CONF_SERVICE_LOCATION_ID
 from .coordinator import BasePowerCoordinator
 
@@ -100,9 +102,9 @@ class BasePowerSensorBase(CoordinatorEntity[BasePowerCoordinator], SensorEntity)
 
 
 class BasePowerBackupHoursSensor(BasePowerSensorBase):
-    """Sensor for battery backup hours remaining."""
+    """Backup hours at the home's current load, from Base."""
 
-    _attr_name = "Battery Backup Time"
+    _attr_name = "Battery Backup Time (Current Load)"
     _attr_native_unit_of_measurement = UnitOfTime.HOURS
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -411,14 +413,19 @@ class BasePowerWifiSsidSensor(BasePowerSensorBase):
 
 
 class BasePowerGridToHomeSensor(BasePowerSensorBase):
-    """Sensor for grid-to-home energy."""
+    """Today's home usage in kWh.
 
-    _attr_name = "Grid to Home Energy"
+    The data key is grid_to_home_kwh for history, but Base reports home load
+    here, not grid draw. It equals grid energy only when solar and the
+    battery supply nothing.
+    """
+
+    _attr_name = "Home Usage Today (All Sources)"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_suggested_display_precision = 2
-    _attr_icon = "mdi:transmission-tower"
+    _attr_icon = "mdi:home-lightning-bolt-outline"
 
     def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
         """Initialize."""
@@ -503,10 +510,14 @@ class BasePowerBillAmountSensor(BasePowerSensorBase):
 
 
 class BasePowerBillDueDateSensor(BasePowerSensorBase):
-    """Sensor for bill due date."""
+    """Due date of the oldest unpaid energy bill.
+
+    Unknown when nothing is owed or the home is not billed by Base for energy.
+    """
 
     _attr_name = "Bill Due Date"
     _attr_icon = "mdi:calendar-clock"
+    _attr_device_class = SensorDeviceClass.DATE
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
@@ -514,12 +525,33 @@ class BasePowerBillDueDateSensor(BasePowerSensorBase):
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_bill_due_date"
 
+    def _account(self) -> dict[str, Any]:
+        return (self.coordinator.data or {}).get("energy_account") or {}
+
     @property
-    def native_value(self) -> str | None:
-        """Return bill due date."""
-        if self.coordinator.data:
-            return self.coordinator.data.get("billing", {}).get("due_date")
-        return None
+    def native_value(self) -> date | None:
+        """Return the due date of the oldest unpaid bill."""
+        return local_due_date(self._account().get("due_at"), dt_util.get_default_time_zone())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Amount due, past-due flag, balance, and upcoming dates."""
+        account = self._account()
+        tz = dt_util.get_default_time_zone()
+        attributes: dict[str, Any] = {}
+        for key in ("amount_due_cents", "outstanding_balance_cents"):
+            cents = account.get(key)
+            if cents is not None:
+                attributes[key.replace("_cents", "")] = round(cents / 100, 2)
+        if account.get("past_due") is not None:
+            attributes["past_due"] = account["past_due"]
+        for key in ("next_bill_date", "next_autopay_date"):
+            day = local_due_date(account.get(key), tz)
+            if day is not None:
+                attributes[key] = day.isoformat()
+        if account.get("due_at") is not None:
+            attributes["due_at_utc"] = datetime.fromtimestamp(account["due_at"], UTC).isoformat()
+        return attributes
 
 
 class BasePowerAssetIdSensor(BasePowerSensorBase):
@@ -565,13 +597,12 @@ class BasePowerGridPowerAmpsSensor(BasePowerSensorBase):
 
 
 class BasePowerDailyTotalGridSensor(BasePowerSensorBase):
-    """Today's grid kWh from usage energy.
+    """Today's home usage kWh, the same sum as Home Usage Today (All Sources).
 
-    Grid status does not include this total. The value is the same sum as
-    Grid to Home. None stays unknown.
+    Base reports home load here, not grid draw. None stays unknown.
     """
 
-    _attr_name = "Daily Total (Grid)"
+    _attr_name = "Daily Total (Home Usage)"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
@@ -616,7 +647,7 @@ class BasePowerDailyAvgGridSensor(BasePowerSensorBase):
 
 
 class BasePowerTotalHomeEnergySensor(BasePowerSensorBase):
-    """Sensor for total home energy consumption (grid + solar + battery)."""
+    """Total home energy use. Base's home load already includes solar and battery."""
 
     _attr_name = "Total Home Energy"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
@@ -704,7 +735,7 @@ class BasePowerBatteryStateSensor(BasePowerSensorBase):
 class BasePowerBackupHours750Sensor(BasePowerSensorBase):
     """Backup hours at a 750 W essentials load."""
 
-    _attr_name = "Battery Backup Time (750 W)"
+    _attr_name = "Battery Backup Time (750 W Essentials)"
     _attr_native_unit_of_measurement = UnitOfTime.HOURS
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -789,7 +820,11 @@ class BasePowerGridSupportEventsSensor(BasePowerSensorBase):
 
 
 class BasePowerEnergyCostTodaySensor(BasePowerSensorBase):
-    """Estimated grid energy cost today. Empty without Base billing."""
+    """Estimated grid energy cost since local midnight. Empty without Base billing.
+
+    The Base app's daily overview shows the last 24 hours instead. That
+    figure is the cost_last_24h attribute.
+    """
 
     _attr_name = "Energy Cost Today"
     _attr_native_unit_of_measurement = "$"
@@ -809,6 +844,12 @@ class BasePowerEnergyCostTodaySensor(BasePowerSensorBase):
             if cents is not None:
                 return round(cents / 100, 2)
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Cost over the last 24 hours, the window the Base app shows."""
+        cents = ((self.coordinator.data or {}).get("overview") or {}).get("cost_24h_cents")
+        return {"cost_last_24h": round(cents / 100, 2)} if cents is not None else {}
 
 
 class BasePowerBillingCycleSensor(BasePowerSensorBase):

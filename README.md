@@ -2,7 +2,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/jerrit/ha-base-power?style=flat-square)](https://github.com/jerrit/ha-base-power/releases)
 [![HACS Validation](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml/badge.svg)](https://github.com/jerrit/ha-base-power/actions/workflows/validate.yml)
-[![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg?style=flat-square)](https://github.com/hacs/integration)
+[![Home Assistant Marketplace](https://img.shields.io/badge/Home%20Assistant-Marketplace-41BDF5.svg?style=flat-square)](https://www.home-assistant.io/integrations/marketplace/)
 [![License: MIT](https://img.shields.io/github/license/jerrit/ha-base-power?style=flat-square)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/jerrit/ha-base-power?style=flat-square)](https://github.com/jerrit/ha-base-power/stargazers)
 [![HA Version](https://img.shields.io/badge/HA-2024.1%2B-blue?style=flat-square&logo=home-assistant)](https://www.home-assistant.io/)
@@ -14,12 +14,12 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 ## Features
 
 - **Battery Level** — State of charge from `stateOfEnergyRaw`, updated about once a minute
-- **Backup Time** — Hours of backup at the current home load
+- **Backup Time (Current Load)** — Hours of backup if the house keeps using power at its current rate
 - **System Capacity** — 25, 40, 50, or 80 kWh, chosen in the integration options. When no capacity was ever saved, a known battery hardware SKU fills it in
 - **Current Power** — Live home load in watts when the service context includes it
 - **Grid Power** — On when grid voltage is at least 100 V and Base has not flagged an outage. Off during an outage, when voltage falls below 50 V, or when the battery reports an off-grid state. Unknown when that telemetry is missing
 - **Battery State** — The battery's mode from Base's newer API: on grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable
-- **Backup Time at 750 W** — Base's essentials-only backup estimate, next to the current-load estimate
+- **Backup Time (750 W Essentials)** — Hours of backup if you cut down to essentials only (about 750 W: fridge, lights, Wi-Fi). Usually much longer than the current-load estimate
 - **24-hour Energy Mix** — Grid, solar, and battery energy to the home over the last 24 hours
 - **Grid Support** — Whether Base is using the battery to support the grid, and how many events ran in the last 24 hours
 - **Costs** — Energy cost today, bill so far, projected bill, and solar buyback credit for accounts billed by Base
@@ -32,11 +32,21 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Battery Connectivity** — Whether the gateway is connected
 - **Billing** — Bill amount and due date when the account returns them
 
-Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples from the v2 daily overview (`GetDailyOverview`, which takes the address string). `MobileGetUsageEnergy`, which takes the numeric service location id, runs only when the overview fails or has no hourly samples for today. Daily Total (Grid) is the grid sum. Battery to Home is 0 when the 24-hour mix shows no battery energy, and unknown otherwise, because Base does not split battery energy by day. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
+Home Usage Today, Solar to Home, and Daily Total (Home Usage) use today's hourly samples from the v2 daily overview (`GetDailyOverview`, which takes the address string). `MobileGetUsageEnergy`, which takes the numeric service location id, runs only when the overview fails or has no hourly samples for today. Daily Total (Home Usage) is the same home load sum. Battery to Home is 0 when the 24-hour mix shows no battery energy, and unknown otherwise, because Base does not split battery energy by day. Recent usage, billing, cycles, and Wi-Fi keep the address string. Grid amps are ``power_from_grid_kw * 1000 / voltage`` when both are present. A negative value is export. The daily average grid interval is today's usage total divided by the number of 15-minute intervals.
 
 ## Installation
 
-### HACS (Recommended)
+### Marketplace (Recommended, Home Assistant 2026.11 and newer)
+
+[![Open in Home Assistant](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jerrit&repository=ha-base-power&category=integration)
+
+1. Go to **Settings** → **Marketplace**
+2. Search for **Base Power**
+3. Click **Install**. Setup starts right away, no restart needed
+
+Already installed through HACS? Home Assistant 2026.11 moves it to the Marketplace automatically, and updates keep coming.
+
+### HACS (Home Assistant before 2026.11)
 
 1. Open HACS in Home Assistant
 2. Search for **Base Power**
@@ -63,7 +73,7 @@ Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples f
 | Entity | Description | Unit |
 |--------|-------------|------|
 | Battery Level | State of charge from the live service context | % |
-| Battery Backup Time | Backup remaining at the current home load | hours |
+| Battery Backup Time (Current Load) | Backup remaining if the house keeps drawing what it draws right now. Moves up and down with your load | hours |
 | Battery Count | Units for the selected capacity | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
 | System Capacity | Capacity selected in the integration options | kWh |
@@ -73,21 +83,21 @@ Grid to Home, Solar to Home, and Daily Total (Grid) use today's hourly samples f
 | Daily Low | Lowest 15-min interval today | kWh |
 | Daily Total Energy | Today's 15-min intervals only, each average kW ÷ 4 | kWh |
 | Intervals Today | Number of data intervals today | — |
-| Grid to Home Energy | Energy drawn from grid | kWh |
+| Home Usage Today (All Sources) | Everything the house used today, whatever the source. Base reports home load here, not grid draw | kWh |
 | Solar to Home Energy | Energy from solar panels | kWh |
 | Battery to Home Energy | Energy discharged from battery today. 0 when the 24-hour mix shows none, otherwise unknown | kWh |
-| Total Home Energy | Combined home consumption (grid + solar + battery) | kWh |
-| Self-Sufficiency | % of home energy from solar + battery | % |
+| Total Home Energy | Everything the house used today. Same value as Home Usage Today (All Sources) | kWh |
+| Self-Sufficiency | % of home usage covered by solar + battery, capped at 100 | % |
 | Grid Current | Grid kW × 1000 ÷ volts. Negative means export | A |
-| Daily Total (Grid) | Today's grid kWh, the same sum as Grid to Home | kWh |
+| Daily Total (Home Usage) | Same value as Home Usage Today (All Sources) | kWh |
 | Daily Average Grid Interval | Today's usage total ÷ intervals today | kWh |
 | Battery State | On grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable. Attributes show `observed_at`, and off grid, `state_of_energy_percent` and `overcurrent_limit_kw` | — |
-| Battery Backup Time (750 W) | Backup remaining at a 750 W essentials load | hours |
+| Battery Backup Time (750 W Essentials) | Backup remaining if the house is cut down to a steady 750 W of essentials. Base's "essentials only" estimate | hours |
 | Grid to Home (24 h) | Grid energy to the home over the last 24 hours | kWh |
 | Solar to Home (24 h) | Solar energy to the home over the last 24 hours | kWh |
 | Battery to Home (24 h) | Battery energy to the home over the last 24 hours | kWh |
 | Grid Support Events (24 h) | Grid support events in the last 24 hours. Attributes show the latest `last_start` and `last_end` | — |
-| Energy Cost Today | Estimated grid energy cost today. Unknown without Base billing | $ |
+| Energy Cost Today | Estimated grid energy cost since midnight. The Base app's daily overview shows the last 24 hours instead; that figure is the `cost_last_24h` attribute. Unknown without Base billing | $ |
 | Bill to Date | Net amount accrued in the current billing cycle. Unknown without Base billing | $ |
 | Projected Bill | Projected consumption charges for the cycle. Unknown without Base billing | $ |
 | Solar Buyback Credit | Solar credit in the current cycle. Unknown without Base billing | $ |
@@ -102,7 +112,7 @@ The 24-hour sensors are a sliding window, so they have no state class and do not
 | Solar Connected | Whether solar panels are present |
 | Battery Connected | Gateway is connected |
 | Battery Charging | State of charge is increasing. Off while the battery stays full |
-| Grid Support | On during a grid support event. The event list refreshes every 15 minutes, so it can lag by that much |
+| Grid Support | On during a grid support event: when the grid is up and the battery is powering the home (checked every 60 seconds), or when Base's event list shows one running. Grid support never turns Grid Power off, so outage automations won't fire on it. Attributes show `detected_by` and `battery_output_kw` |
 
 ### Select
 
@@ -115,10 +125,10 @@ The 24-hour sensors are a sliding window, so they have no state class and do not
 | Entity | Description | Unit |
 |--------|-------------|------|
 | WiFi Signal | Battery WiFi signal strength | % |
-| Battery Hardware | Hardware SKU from the battery account, for example `GRO_SINGLE`. Attributes show `plan_name` | — |
+| Battery Hardware | Hardware SKU from the battery account, for example `GRO_SINGLE`. Attributes show `plan_name` when Base sends one | — |
 | WiFi SSID | Connected WiFi network name | — |
 | Bill Amount | Current billing amount | $ |
-| Bill Due Date | Next bill due date | — |
+| Bill Due Date | Due date of the oldest unpaid energy bill. Unknown when nothing is owed or Base doesn't bill you for energy. Attributes show `amount_due`, `past_due`, `outstanding_balance`, `next_bill_date`, and `next_autopay_date` | date |
 | Asset ID | System asset identifier | — |
 
 ## Energy Dashboard
@@ -127,18 +137,20 @@ The following sensors use `state_class: total_increasing` and are ready to confi
 
 | Energy Dashboard slot | Sensor to use |
 |----------------------|---------------|
-| Grid consumption | Grid to Home Energy |
+| Grid consumption | Home Usage Today (All Sources) (see note) |
 | Solar panels | Solar to Home Energy |
 | Battery discharge | Battery to Home Energy |
 | Home consumption | Total Home Energy |
 
-Grid to Home and Solar to Home fill from today's hourly samples. Battery to Home stays unknown. Recent usage fills Current Power, the daily totals, and the interval sensors. Daily totals count local-midnight onward, not the whole trailing 24 hours.
+**Note:** Base does not report a daily grid-only total. Home Usage Today (All Sources) is total home usage, so it matches grid use only when solar and the battery supply nothing. With solar or regular battery discharge it overstates grid use.
+
+Home Usage Today and Solar to Home fill from today's hourly samples. Battery to Home stays unknown. Recent usage fills Current Power, the daily totals, and the interval sensors. Daily totals count local-midnight onward, not the whole trailing 24 hours.
 
 ## Technical Details
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
-- **Polling**: Service context and grid status every 60 seconds. The battery snapshot every 10 minutes, and every 60 seconds while the outage flag, voltage, or the last snapshot points to an outage. The daily overview every 15 minutes. Dashboard, Wi-Fi, billing, usage cycles, and the billing cycle every 6 hours, and again on startup or when the numeric location id is missing. About 131 calls an hour
+- **Polling**: Service context and grid status every 60 seconds. The battery snapshot every 10 minutes, and every 60 seconds while the outage flag, voltage, or the last snapshot points to an outage. The daily overview every 15 minutes. Dashboard, Wi-Fi, billing, usage cycles, the billing cycle, and the account list every 6 hours, and again on startup or when the numeric location id is missing. About 131 calls an hour
 - **Fallbacks**: 15-minute usage and today's energy come from the newer daily overview. The older recent-usage and usage-energy calls run only when the overview fails or lacks that data. Grid voltage comes from the older grid status call, and the newer voltage call fills in when it fails or returns nothing. Intervals Today shows `usage_source` and `energy_source`, and Grid Power shows `voltage_source` (`overview`, `legacy`, or `v2`)
 - **Battery**: 25, 40, 50, or 80 kWh, set in the integration options. Base Core's nameplate is 39.2 kWh per unit; the integration uses 40 and 80.
 - **Battery %**: `stateOfEnergyRaw` from `MobileGetServiceContext`
@@ -158,10 +170,11 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Battery Backup Time.** This reads `availableBackup` hours and should move as the house load changes. The dashboard value 49652 is the numeric service location id, not a backup duration.
 - **Current Power.** When service context includes home load, this sensor uses that live kilowatt reading. Otherwise the latest 15-minute sample is average kW, and watts are that value times 1000.
 - **Battery Charging while full.** A flat 100% reads off. Confirmed on the development account.
-- **Bill Amount and Bill Due Date.** These stay empty on plans that have no billing info. That is a real empty response, not a failed poll. When a bill is present, compare the amount with a Base invoice before treating it as the amount due. The nested sample from issue #6 decodes to $188.53. The unmapped field next to it (33840) is not shown.
+- **Bill Due Date.** Compare with the due date in the Base app. Unknown is correct when the bill is paid. `due_at_utc` shows the raw time Base sent, useful if the date looks a day off.
+- **Bill Amount.** This stays empty on plans that have no billing info. That is a real empty response, not a failed poll. When a bill is present, compare the amount with a Base invoice before treating it as the amount due. The nested sample from issue #6 decodes to $188.53. The unmapped field next to it (33840) is not shown.
 - **Grid to Home and Solar to Home.** `MobileGetUsageEnergy` uses the numeric service location id and no time fields. `UsageEnergy parsed` should show today's summed grid and solar kWh. Battery to Home stays unknown. A missing series stays unknown.
 - **Daily Total Energy.** It sums 15-minute samples from local midnight onward. Each sample is average kW divided by 4. The previous 24-hour sum was about four times too large.
-- **Daily Total (Grid).** Same today's grid kWh as Grid to Home. Unknown when that sum is missing.
+- **Daily Total (Home Usage).** Same value as Home Usage Today. Unknown when that sum is missing.
 - **Daily Average Grid Interval.** Today's usage total divided by the number of 15-minute intervals today. Unknown when today has no intervals.
 - **Grid Current.** `power_from_grid_kw * 1000 / voltage_volts` when voltage is above 0. Negative power is export and stays negative. Unknown when either reading is missing.
 - **Capacity.** Choose 25, 40, 50, or 80 kWh. Base Core is published as 39.2 kWh per unit and 78.4 kWh for two. There is no free-form kWh box and no automatic detection.
@@ -169,6 +182,18 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
 
 ## Changelog
+
+### v1.13.1
+- Renamed Grid to Home Energy to **Home Usage Today (All Sources)**, and Daily Total (Grid) to **Daily Total (Home Usage)**. Base reports total home usage here, not grid draw, so the old names were wrong. The values are unchanged.
+- Renamed the backup sensors so the difference is clear: **Battery Backup Time (Current Load)** assumes the house keeps using power at today's rate, and **Battery Backup Time (750 W Essentials)** assumes you cut down to essentials only.
+- Fixed Total Home Energy for homes with solar. It added solar and battery on top of home usage, which already includes them, so solar was counted twice. It now equals home usage. Self-Sufficiency used the same inflated total, so it now reads correctly too (capped at 100%). Homes without solar or battery discharge see no change.
+- Fixed Bill Due Date, which was always unknown. The older billing call it read has no due date. It now reads the energy account from Base's newer billing API, with the amount due, past-due flag, balance, next bill date, and next autopay date as attributes. It stays unknown when nothing is owed.
+- Adds the `GRO_DUAL` SKU (two 25 kWh units, 50 kWh), confirmed by a user. Two-battery homes that never saved a capacity now get 50 kWh automatically.
+- Energy Cost Today gets a `cost_last_24h` attribute. The sensor counts from midnight, while the Base app's daily overview shows the last 24 hours, so the two didn't match.
+- Fixed Grid Support missing live events. It read only Base's event list, which refreshes every 15 minutes and lagged behind an event in progress. It now also turns on within a minute when the grid is up and the battery is powering the home (0.2 kW or more). Thanks to a Reddit user for the screenshots that caught this.
+- Fixed today's energy showing yesterday's total for about an hour after midnight. Base posts the new day's first hour late, and the integration kept the last value until then. Home Usage Today, Total Home Energy, Solar to Home, and the related sensors now start at 0 at local midnight. A failed refresh during the day still keeps the last value.
+- The README now covers installing from the Home Assistant Marketplace, which replaced HACS in Home Assistant 2026.11. Nothing changes for existing installs.
+- Existing installs keep their entity IDs, so dashboards and automations keep working. Only the display names change.
 
 ### v1.13.0
 - Base's current app uses a newer API. This release adds calls to it alongside the older API the integration has always used. Base has not announced anything, but the older API may be phased out over time. I'm tracking these changes and will move sensors to the newer API as needed.
