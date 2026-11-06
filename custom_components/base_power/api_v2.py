@@ -85,6 +85,31 @@ def _int64(value: int) -> int:
     return value - (1 << 64) if value >= 1 << 63 else value
 
 
+def parse_locations(data: bytes) -> list[dict[str, str]]:
+    """Parse ListLocationsResponse into address ids with a short label.
+
+    locations (1, repeated LocationSummary): 1 address_id, 2 DisplayAddress
+    {1 line_1, 3 city}, 3 status. The label is for the setup picker only.
+    """
+    locations: list[dict[str, str]] = []
+    for field_num, kind, summary in _iter_fields(data):
+        if field_num != 1 or kind != "bytes":
+            continue
+        address_id = ""
+        parts: dict[int, str] = {}
+        for sub_num, sub_kind, value in _iter_fields(summary):
+            if sub_num == 1 and sub_kind == "bytes":
+                address_id = value.decode("utf-8", "replace").strip()
+            elif sub_num == 2 and sub_kind == "bytes":
+                for addr_num, addr_kind, text in _iter_fields(value):
+                    if addr_num in (1, 3) and addr_kind == "bytes":
+                        parts[addr_num] = text.decode("utf-8", "replace").strip()
+        if address_id:
+            label = ", ".join(p for p in (parts.get(1), parts.get(3)) if p)
+            locations.append({"address_id": address_id, "label": label or address_id})
+    return locations
+
+
 def empty_snapshot() -> dict[str, Any]:
     return {
         "available": False,

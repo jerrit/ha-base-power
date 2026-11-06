@@ -350,3 +350,63 @@ def test_due_date_at_midnight_utc_keeps_its_day():
     # 2026-11-20 05:59 UTC is a real moment, still Nov 19 in Chicago.
     assert str(v2.local_due_date(1_795_132_800 + 5 * 3600 + 59 * 60, chicago)) == "2026-11-19"
     assert v2.local_due_date(None, chicago) is None
+
+
+def _location(address_id: bytes, line_1: bytes = b"", city: bytes = b"") -> bytes:
+    address = (msg(1, line_1) if line_1 else b"") + (msg(3, city) if city else b"")
+    return msg(1, msg(1, address_id) + (msg(2, address) if address else b"") + num(3, 1))
+
+
+def test_parse_locations_reads_ids_and_labels():
+    data = _location(b"SITE0001", b"1 Main St", b"Austin") + _location(b"SITE0002")
+    assert v2.parse_locations(data) == [
+        {"address_id": "SITE0001", "label": "1 Main St, Austin"},
+        {"address_id": "SITE0002", "label": "SITE0002"},
+    ]
+    assert v2.parse_locations(b"") == []
+
+
+def _discover(v2_result, legacy_id):
+    """Run setup discovery with fake ListLocations and legacy responses."""
+    import asyncio
+
+    api = sys.modules[_PKG + ".api"]
+    client_cls = api.BasePowerApiClient
+    calls = []
+
+    async def fake_invoke(self, method, payload=b"", *, optional=False, service=""):
+        calls.append(method)
+        if isinstance(v2_result, Exception):
+            raise v2_result
+        return v2_result
+
+    async def fake_legacy(session, jwt):
+        calls.append("MobileGetAvailableLocations")
+        return legacy_id
+
+    saved = (client_cls._invoke, client_cls.async_discover_location_id)
+    client_cls._invoke = fake_invoke
+    client_cls.async_discover_location_id = staticmethod(fake_legacy)
+    try:
+        result = asyncio.run(client_cls.async_discover_locations(None, "jwt"))
+    finally:
+        client_cls._invoke, client_cls.async_discover_location_id = saved
+    return result, calls
+
+
+def test_discovery_prefers_list_locations():
+    result, calls = _discover((_location(b"SITE0001", b"1 Main St"), True), "LEGACY01")
+    assert result == [{"address_id": "SITE0001", "label": "1 Main St"}]
+    assert calls == ["ListLocations"]
+
+
+def test_discovery_falls_back_to_the_older_call():
+    for v2_result in ((b"", False), (b"", True), RuntimeError("down")):
+        result, calls = _discover(v2_result, "LEGACY01")
+        assert result == [{"address_id": "LEGACY01", "label": "LEGACY01"}]
+        assert calls == ["ListLocations", "MobileGetAvailableLocations"]
+
+
+def test_discovery_returns_nothing_when_both_fail():
+    result, _ = _discover((b"", False), None)
+    assert result == []

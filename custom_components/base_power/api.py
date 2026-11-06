@@ -432,6 +432,34 @@ class BasePowerApiClient:
         self._jwt = jwt
 
     @staticmethod
+    async def async_discover_locations(
+        session: aiohttp.ClientSession, jwt: str
+    ) -> list[dict[str, str]]:
+        """List the account's sites for setup.
+
+        Tries the newer LocationsService/ListLocations first, then the older
+        MobileGetAvailableLocations. Returns [] when neither finds a site.
+        """
+        from . import api_v2  # api_v2 imports this module, so import late
+
+        client = BasePowerApiClient(session)
+        client.set_jwt(jwt)
+        try:
+            data, ok = await client._invoke(
+                "ListLocations",
+                optional=True,
+                service=f"{api_v2.V2_PACKAGE}.LocationsService",
+            )
+            locations = api_v2.parse_locations(data) if ok else []
+        except Exception:
+            _LOGGER.debug("ListLocations failed", exc_info=True)
+            locations = []
+        if locations:
+            return locations
+        location_id = await BasePowerApiClient.async_discover_location_id(session, jwt)
+        return [{"address_id": location_id, "label": location_id}] if location_id else []
+
+    @staticmethod
     async def async_discover_location_id(
         session: aiohttp.ClientSession, jwt: str
     ) -> str | None:

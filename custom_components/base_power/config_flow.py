@@ -9,6 +9,7 @@ import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.const import CONF_EMAIL
 from homeassistant.helpers.selector import (
     SelectSelector,
@@ -129,6 +130,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._session_id: str = ""
         self._session_jwt: str | None = None
         self._service_location_id: str = ""
+        self._locations: list[dict[str, str]] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -201,7 +203,10 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             {CONF_SERVICE_LOCATION_ID: self._service_location_id}
                         )
 
-                    # Auto-discover service location ID
+                    # Find the account's sites. Only the lookup is guarded:
+                    # the next step can abort the flow (already configured),
+                    # and that must not be treated as a lookup failure.
+                    locations: list[dict[str, str]] = []
                     try:
                         auth = BasePowerAuth(
                             session,
@@ -210,23 +215,32 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             self._session_jwt,
                         )
                         jwt = await auth.async_ensure_valid_token()
-                        location_id = await BasePowerApiClient.async_discover_location_id(
+                        locations = await BasePowerApiClient.async_discover_locations(
                             session, jwt
                         )
-                        if location_id:
-                            _LOGGER.info(
-                                "Auto-discovered service location ID: %s", location_id
-                            )
-                            return await self.async_step_location(
-                                {CONF_SERVICE_LOCATION_ID: location_id}
-                            )
                     except Exception:
                         _LOGGER.warning(
                             "Location auto-discovery failed, falling back to manual entry",
                             exc_info=True,
                         )
 
+                    # Skip sites already set up. If all are, the first one
+                    # falls through to the already-configured abort.
+                    configured = self._async_current_ids()
+                    locations = [
+                        loc for loc in locations if loc["address_id"] not in configured
+                    ] or locations[:1]
+                    if len(locations) == 1:
+                        _LOGGER.info("Found one Base Power site")
+                        return await self.async_step_location(
+                            {CONF_SERVICE_LOCATION_ID: locations[0]["address_id"]}
+                        )
+                    if locations:
+                        self._locations = locations
+                        return await self.async_step_pick_location()
                     return await self.async_step_location()
+            except AbortFlow:
+                raise
             except AuthenticationError:
                 errors["base"] = "invalid_code"
             except Exception:
@@ -238,6 +252,31 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({vol.Required("code"): str}),
             description_placeholders={"email": self._email},
             errors=errors,
+        )
+
+    async def async_step_pick_location(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 3a: Choose a site when the account has more than one."""
+        if user_input is not None:
+            return await self.async_step_location(
+                {CONF_SERVICE_LOCATION_ID: user_input[CONF_SERVICE_LOCATION_ID]}
+            )
+        return self.async_show_form(
+            step_id="pick_location",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_SERVICE_LOCATION_ID): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                {"value": loc["address_id"], "label": loc["label"]}
+                                for loc in self._locations
+                            ],
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    )
+                }
+            ),
         )
 
     async def async_step_location(
