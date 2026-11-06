@@ -244,18 +244,19 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         resolved = resolve_battery_capacity(options.get(CONF_BATTERY_CAPACITY))
         sku = (self._poll.battery_account or {}).get("hardware_sku")
         detected = HARDWARE_SKU_CAPACITY.get(sku) if sku else None
-        # A saved option always wins. The SKU fills in only when no capacity
-        # was ever saved, and only for SKUs whose size is known.
-        if resolved is not None:
+        # A known SKU wins. The settings form pre-fills a capacity, so a saved
+        # value may never have been chosen on purpose. The saved option covers
+        # unknown SKUs and a missing battery account.
+        if detected is not None:
+            units, kwh = detected
+            source = "sku"
+        elif resolved is not None:
             units, kwh = resolved
             source = "option"
         elif CONF_BATTERY_COUNT in options:
             units = options[CONF_BATTERY_COUNT]
             kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
             source = "option"
-        elif detected is not None:
-            units, kwh = detected
-            source = "sku"
         else:
             units = DEFAULT_BATTERY_COUNT
             kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
@@ -292,15 +293,20 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # grid_to_home_kwh is Base's home load: everything the house used,
         # solar and battery included. Adding solar and battery to it would
         # count them twice.
-        total_home = energy.get("grid_to_home_kwh") or 0.0
+        # At midnight the day starts at 0 kWh. Show 0, not unknown, until
+        # Base posts the first hour. Unknown means Base sent no reading.
+        home_kwh = energy.get("grid_to_home_kwh")
+        total_home = home_kwh or 0.0
         solar_kwh = energy.get("solar_to_home_kwh") or 0.0
         battery_kwh = energy.get("battery_to_home_kwh") or 0.0
-        derived["total_home_kwh"] = round(total_home, 3) if total_home > 0 else None
+        derived["total_home_kwh"] = round(total_home, 3) if home_kwh is not None else None
         if total_home > 0:
             # Solar can exceed home use when it exports, so cap at 100.
             derived["self_sufficiency_percent"] = round(
                 min((solar_kwh + battery_kwh) / total_home, 1.0) * 100, 1
             )
+        elif home_kwh is not None:
+            derived["self_sufficiency_percent"] = 0.0
         else:
             derived["self_sufficiency_percent"] = None
         if not dashboard.get("has_solar") and solar_kwh > 0:

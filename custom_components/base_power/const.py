@@ -36,7 +36,8 @@ GRID_COLLAPSED_VOLTS = 50.0
 # Battery capacity options: label → (units, kWh).
 # Base lists Core as 39.2 kWh per unit (78.4 kWh for two). The dropdown uses
 # the rounded sizes, 40 and 80. Original hardware is already 25 and 50.
-BATTERY_CAPACITY_OPTIONS: dict[str, tuple[int, int]] = {
+BATTERY_CAPACITY_OPTIONS: dict[str, tuple[int, float]] = {
+    "20 kWh (1 Wall)": (1, 20),
     "25 kWh (1 unit)": (1, 25),
     "40 kWh (1 Core)": (1, 40),
     "50 kWh (2 units)": (2, 50),
@@ -49,10 +50,14 @@ _BATTERY_CAPACITY_ALIASES = {
 }
 DEFAULT_BATTERY_CAPACITY = "25 kWh (1 unit)"
 # Battery hardware SKU from the v2 battery account → (units, kWh).
-# Only SKUs confirmed on a real account. Add others as users report them.
-HARDWARE_SKU_CAPACITY: dict[str, tuple[int, int]] = {
+# Names and sizes match Base's web checkout. Core uses Base's exact sizes.
+# NO_BATTERY is left out on purpose, so it falls back to the dropdown.
+HARDWARE_SKU_CAPACITY: dict[str, tuple[int, float]] = {
     "GRO_SINGLE": (1, 25),
     "GRO_DUAL": (2, 50),
+    "GRO_WALL": (1, 20),
+    "BASE1_SINGLE": (1, 39.2),
+    "BASE1_DUAL": (2, 78.4),
 }
 # Legacy fallback for installs that still store an integer unit count.
 BATTERY_CAPACITY_PER_UNIT_KWH = 25
@@ -69,7 +74,7 @@ def canonical_battery_capacity(label: str | None) -> str | None:
     return None
 
 
-def resolve_battery_capacity(label: str | None) -> tuple[int, int] | None:
+def resolve_battery_capacity(label: str | None) -> tuple[int, float] | None:
     """Return (units, kWh) for a saved capacity label."""
     canonical = canonical_battery_capacity(label)
     if canonical is None:

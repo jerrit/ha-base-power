@@ -53,6 +53,7 @@ def _compose(
     mix=None,
     energy_battery=None,
     energy_solar=0.0,
+    energy_grid=6.8,
     fail_snapshot=False,
     storage_kw=None,
     support_intervals=None,
@@ -71,7 +72,7 @@ def _compose(
             coordinator._prev_soc = None
             coordinator._poll = poll.PollState()
             coordinator._poll.energy = {
-                "grid_to_home_kwh": 6.8,
+                "grid_to_home_kwh": energy_grid,
                 "solar_to_home_kwh": energy_solar,
                 "battery_to_home_kwh": energy_battery,
             }
@@ -144,6 +145,19 @@ def test_total_home_energy_does_not_count_solar_twice():
     data = _compose("on_grid", energy_solar=2.0, energy_battery=1.4)
     assert data["derived"]["total_home_kwh"] == 6.8
     assert data["derived"]["self_sufficiency_percent"] == 50.0
+
+
+def test_day_start_shows_zero_not_unknown():
+    # Just after midnight the day is reset to 0 kWh before Base posts an hour.
+    data = _compose("on_grid", energy_grid=0.0)
+    assert data["derived"]["total_home_kwh"] == 0.0
+    assert data["derived"]["self_sufficiency_percent"] == 0.0
+
+
+def test_missing_home_usage_is_unknown():
+    data = _compose("on_grid", energy_grid=None)
+    assert data["derived"]["total_home_kwh"] is None
+    assert data["derived"]["self_sufficiency_percent"] is None
 
 
 def test_self_sufficiency_caps_at_100_when_solar_exports():
@@ -358,11 +372,20 @@ def _capacity(options, sku):
     return asyncio.run(run())
 
 
-def test_saved_capacity_option_wins_over_the_sku():
-    dashboard, kwh = _capacity({"battery_capacity": "80 kWh (2 Core)"}, "GRO_SINGLE")
-    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (80, 2, "option")
-    assert dashboard["detected_capacity_kwh"] == 25
+def test_known_sku_wins_over_a_saved_capacity():
+    # A Core owner who saved the pre-filled 25 kWh still gets their real size.
+    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, "BASE1_DUAL")
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (78.4, 2, "sku")
     dashboard, kwh = _capacity({"battery_count_override": 2}, "GRO_SINGLE")
+    assert (kwh, dashboard["capacity_source"]) == (25, "sku")
+
+
+def test_saved_capacity_covers_an_unknown_or_missing_sku():
+    for sku in ("SOMETHING_NEW", "NO_BATTERY", None):
+        dashboard, kwh = _capacity({"battery_capacity": "80 kWh (2 Core)"}, sku)
+        assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (80, 2, "option")
+        assert dashboard["detected_capacity_kwh"] is None
+    dashboard, kwh = _capacity({"battery_count_override": 2}, None)
     assert (kwh, dashboard["capacity_source"]) == (50, "option")
 
 
@@ -374,8 +397,25 @@ def test_known_sku_fills_capacity_when_no_option_was_saved():
     assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (50, 2, "sku")
 
 
+def test_wall_and_core_skus_fill_capacity():
+    cases = {
+        "GRO_WALL": (20, 1),
+        "BASE1_SINGLE": (39.2, 1),
+        "BASE1_DUAL": (78.4, 2),
+    }
+    for sku, (want_kwh, want_units) in cases.items():
+        dashboard, kwh = _capacity({}, sku)
+        assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (want_kwh, want_units, "sku")
+        assert dashboard["detected_capacity_kwh"] == want_kwh
+
+
+def test_wall_option_applies_without_a_sku():
+    dashboard, kwh = _capacity({"battery_capacity": "20 kWh (1 Wall)"}, None)
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (20, 1, "option")
+
+
 def test_unknown_or_missing_sku_uses_the_default():
-    for sku in ("SOMETHING_NEW", None):
+    for sku in ("SOMETHING_NEW", "NO_BATTERY", None):
         dashboard, kwh = _capacity({}, sku)
         assert (kwh, dashboard["capacity_source"]) == (25, "default")
         assert dashboard["detected_capacity_kwh"] is None
