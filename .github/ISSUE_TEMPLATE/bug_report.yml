@@ -1,0 +1,65 @@
+name: Bug report
+description: Something is wrong or missing in the Base Power integration.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please remove anything personal before you submit: email, address, account numbers, and tokens.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead. If a value differs from the Base app, include both values.
+    validations:
+      required: true
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      description: Settings → Devices & services → Base Power, or the Base Power update entity.
+      placeholder: "1.13.2"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      description: Settings → About.
+      placeholder: "2026.11.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Home Assistant Marketplace
+        - HACS
+        - Manual copy
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Battery Hardware
+      description: The Battery Hardware sensor's value, under Diagnostic on the device page. For example GRO_SINGLE.
+      placeholder: "GRO_SINGLE"
+  - type: input
+    id: system
+    attributes:
+      label: System size
+      description: Your battery size and whether you have solar. For example "Two Base Core, with solar".
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Settings → System → Logs, search for base_power, and paste any related lines. Remove tokens and personal details.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed personal details (email, address, account numbers, tokens).
+          required: true
