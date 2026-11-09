@@ -15,7 +15,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 
 - **Battery Level** — State of charge from `stateOfEnergyRaw`, updated about once a minute
 - **Backup Time (Current Load)** — Hours of backup if the house keeps using power at its current rate
-- **System Capacity** — 25, 40, 50, or 80 kWh, chosen in the integration options. When no capacity was ever saved, a known battery hardware SKU fills it in
+- **System Capacity** — detected from your battery model: Wall 20 kWh, original 25 or 50 kWh, Base Core 39.2 or 78.4 kWh. If Base doesn't report a known model, the capacity chosen in the integration options is used
 - **Current Power** — Live home load in watts when the service context includes it
 - **Grid Power** — On when grid voltage is at least 100 V and Base has not flagged an outage. Off during an outage, when voltage falls below 50 V, or when the battery reports an off-grid state. Unknown when that telemetry is missing
 - **Battery State** — The battery's mode from Base's newer API: on grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable
@@ -74,7 +74,7 @@ Already installed through HACS? Home Assistant 2026.11 moves it to the Marketpla
 |--------|-------------|------|
 | Battery Level | State of charge from the live service context | % |
 | Battery Backup Time (Current Load) | Backup remaining if the house keeps drawing what it draws right now. Moves up and down with your load | hours |
-| Battery Count | Units for the selected capacity | — |
+| Battery Count | Battery units, from the detected model or the chosen capacity | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
 | System Capacity | Capacity selected in the integration options | kWh |
 | Current Power | Live home load, or the latest 15-minute average kW when live load is missing | W |
@@ -183,6 +183,12 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 
 ## Changelog
 
+### v1.13.2
+- Fixed Total Home Energy and Self-Sufficiency showing "unknown" for about an hour after midnight. They now show 0 after the reset and climb once Base posts the first hour.
+- System Capacity is detected from the battery model: Wall Battery 20 kWh (`GRO_WALL`), Single Battery 25 kWh (`GRO_SINGLE`), Double Battery 50 kWh (`GRO_DUAL`), Base Core 39.2 kWh (`BASE1_SINGLE`), and Dual Base Core 78.4 kWh (`BASE1_DUAL`).
+- The detected model now wins over the Battery Capacity setting, which many installs saved at the pre-filled 25 kWh. The setting still applies when Base doesn't report a known model.
+- Adds a 20 kWh (1 Wall) choice to the Battery Capacity setting.
+
 ### v1.13.1
 - Renamed Grid to Home Energy to **Home Usage Today (All Sources)**, and Daily Total (Grid) to **Daily Total (Home Usage)**. Base reports total home usage here, not grid draw, so the old names were wrong. The values are unchanged.
 - Renamed the backup sensors so the difference is clear: **Battery Backup Time (Current Load)** assumes the house keeps using power at today's rate, and **Battery Backup Time (750 W Essentials)** assumes you cut down to essentials only.
@@ -205,7 +211,7 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 - Grid voltage gets a fallback: when the older grid status call fails or returns nothing, the newer voltage call fills in.
 - The battery snapshot runs every 10 minutes, and every 60 seconds while the outage flag, voltage, or the last snapshot points to an outage. A failing snapshot call does not speed this up.
 - Intervals Today shows `usage_source` and `energy_source`. Grid Power shows `voltage_source`. Each is `overview`, `legacy`, or `v2`.
-- Battery Hardware shows the battery's hardware SKU and plan name. System Capacity shows `capacity_source` (`option`, `sku`, or `default`) and `detected_capacity_kwh`. A saved capacity option always wins. The SKU fills in only when no capacity was ever saved, and only for a known SKU. `GRO_SINGLE` (one 25 kWh unit) is the only one confirmed so far. If yours shows another SKU, please open an issue with it and your system size.
+- Battery Hardware shows the battery's hardware SKU and plan name. System Capacity shows `capacity_source` (`option`, `sku`, or `default`) and `detected_capacity_kwh`. Capacity comes from the SKU when Base reports a known one: `GRO_WALL` 20 kWh, `GRO_SINGLE` 25 kWh, `GRO_DUAL` 50 kWh (2 units), `BASE1_SINGLE` 39.2 kWh (Base Core), `BASE1_DUAL` 78.4 kWh (2 Base Core). The Battery Capacity option is used only when the SKU is missing or unknown. If yours shows another SKU, please open an issue with it and your system size.
 - Grid Power shows `battery_state`, so an off state caused by the battery snapshot is visible in its attributes.
 - Hourly energy and cost samples that are not finite numbers are skipped, so one bad hour cannot break the daily sensors.
 - About 131 calls an hour, close to the 129 in 1.12.1, while adding the new data.
