@@ -21,4 +21,7 @@ Battery models are now detected automatically, and the midnight reset no longer 
 
 If your System Capacity changes after updating, the detected model is the reason. If it looks wrong, open an issue with your Battery Hardware value and system size.
 
+### Known issues
+- **Bill Amount** may not match the Base app. A fix is coming in a later release.
+
 Restart Home Assistant after updating.
