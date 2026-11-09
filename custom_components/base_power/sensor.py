@@ -18,6 +18,7 @@ from homeassistant.const import (
     UnitOfTime,
     PERCENTAGE,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -75,7 +76,28 @@ async def async_setup_entry(
         BasePowerBillingCycleSensor(coordinator, entry, "net_accrued_cents", "Bill to Date", "mdi:cash-clock"),
         BasePowerBillingCycleSensor(coordinator, entry, "projected_charges_cents", "Projected Bill", "mdi:cash-fast"),
         BasePowerBillingCycleSensor(coordinator, entry, "solar_credit_cents", "Solar Buyback Credit", "mdi:cash-plus"),
+        BasePowerRunningTotalSensor(coordinator, entry, "home_usage_total_kwh", "home_usage_total", "Home Usage (Total)", "mdi:home-lightning-bolt"),
     ]
+    data = coordinator.data or {}
+    if (data.get("dashboard") or {}).get("has_solar"):
+        entities.append(
+            BasePowerRunningTotalSensor(coordinator, entry, "solar_total_kwh", "solar_to_home_total", "Solar to Home (Total)", "mdi:solar-power")
+        )
+
+    # A site without Base energy service has no energy bills. Leave out the
+    # billing sensors that have nothing to show, and remove ones left from
+    # earlier versions. Any that still have a value stay.
+    if (data.get("location") or {}).get("energy_service") == "no_service":
+        registry = er.async_get(hass)
+        kept = []
+        for entity in entities:
+            if isinstance(entity, BILLING_SENSORS) and entity.native_value is None:
+                entity_id = registry.async_get_entity_id("sensor", DOMAIN, entity.unique_id)
+                if entity_id:
+                    registry.async_remove(entity_id)
+                continue
+            kept.append(entity)
+        entities = kept
 
     async_add_entities(entities)
 
@@ -202,6 +224,7 @@ class BasePowerCapacitySensor(BasePowerSensorBase):
         return {
             "capacity_source": dashboard.get("capacity_source"),
             "detected_capacity_kwh": dashboard.get("detected_capacity_kwh"),
+            "model_capacity_kwh": dashboard.get("model_capacity_kwh"),
         }
 
 
@@ -487,9 +510,14 @@ class BasePowerBatteryToHomeSensor(BasePowerSensorBase):
 
 
 class BasePowerBillAmountSensor(BasePowerSensorBase):
-    """Sensor for current bill amount."""
+    """Amount of the last energy bill.
 
-    _attr_name = "Bill Amount"
+    Reads the energy account from Base's newer billing API, then the older
+    billing call's last-bill field. Before 1.14 this showed spend so far
+    this cycle, the same as Bill to Date.
+    """
+
+    _attr_name = "Last Bill Amount"
     _attr_native_unit_of_measurement = "$"
     _attr_icon = "mdi:currency-usd"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -501,12 +529,12 @@ class BasePowerBillAmountSensor(BasePowerSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        """Return bill amount in dollars."""
-        if self.coordinator.data:
-            cents = self.coordinator.data.get("billing", {}).get("amount_cents")
-            if cents is not None:
-                return round(cents / 100, 2)
-        return None
+        """Return the last bill in dollars."""
+        data = self.coordinator.data or {}
+        cents = (data.get("energy_account") or {}).get("last_bill_amount_cents")
+        if cents is None:
+            cents = (data.get("billing") or {}).get("last_bill_cents")
+        return round(cents / 100, 2) if cents is not None else None
 
 
 class BasePowerBillDueDateSensor(BasePowerSensorBase):
@@ -922,4 +950,56 @@ class BasePowerHardwareSkuSensor(BasePowerSensorBase):
             attributes["plan_name"] = account["plan_name"]
         if account.get("equipment_description"):
             attributes["equipment_description"] = account["equipment_description"]
+        batteries = ((self.coordinator.data or {}).get("dashboard") or {}).get("batteries") or []
+        if batteries:
+            # Base's newer model fields, one entry per battery
+            attributes["battery_models"] = [
+                f"{battery.get('generation') or 'unknown'} {battery.get('variant') or 'unknown'}"
+                for battery in batteries
+            ]
         return attributes
+
+
+class BasePowerRunningTotalSensor(BasePowerSensorBase):
+    """Energy total that never resets. Use it in the Energy dashboard.
+
+    The daily sensors miss each day's last hour, which Base posts after
+    midnight. This total adds every hour once, whenever it arrives.
+    """
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self,
+        coordinator: BasePowerCoordinator,
+        entry: ConfigEntry,
+        key: str,
+        unique_key: str,
+        name: str,
+        icon: str,
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._key = key
+        self._attr_name = name
+        self._attr_icon = icon
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_{unique_key}"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the running total in kWh. Unknown until the first hour is counted."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("derived", {}).get(self._key)
+        return None
+
+
+# Sensors that only apply to homes billed by Base for energy
+BILLING_SENSORS = (
+    BasePowerBillAmountSensor,
+    BasePowerBillDueDateSensor,
+    BasePowerEnergyCostTodaySensor,
+    BasePowerBillingCycleSensor,
+)

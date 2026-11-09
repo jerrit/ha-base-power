@@ -231,7 +231,7 @@ def test_usage_energy_malformed_stays_none():
 
 def test_billing_empty_submessages_stay_none():
     parsed = BasePowerApiClient._parse_billing_metadata(bytes.fromhex("0a001200"))
-    assert parsed == {"amount_cents": None, "due_date": None}
+    assert parsed == {"amount_cents": None, "last_bill_cents": None, "due_date": None}
 
 
 def test_usage_cycles_parse_a_long_entry_and_the_current_start():

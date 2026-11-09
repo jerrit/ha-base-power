@@ -410,3 +410,71 @@ def test_discovery_falls_back_to_the_older_call():
 def test_discovery_returns_nothing_when_both_fail():
     result, _ = _discover((b"", False), None)
     assert result == []
+
+
+# --- 1.14: location, last bill, late hours -------------------------------------
+
+
+def _battery(generation: int, variant: int) -> bytes:
+    return msg(1, b"device-id") + num(2, generation) + num(3, variant)
+
+
+def _site(energy_state: int | None, battery_state: int, battery_list: bytes, caps: bytes = b"") -> bytes:
+    body = msg(1, msg(1, b"addr") + msg(2, msg(1, b"1 Main St")))
+    if energy_state is not None:
+        body += msg(2, msg(energy_state, b""))
+    body += msg(3, msg(battery_state, battery_list))
+    body += msg(4, caps)
+    return msg(1, body)
+
+
+def test_location_reads_energy_service_solar_and_onsite_batteries():
+    # onsite (5) lists batteries in field 4. Our site: one GEN1 SINGLE, no energy service.
+    parsed = v2.parse_location(
+        _site(2, 5, msg(1, num(1, 1)) + msg(4, _battery(1, 1)), caps=num(2, 1))
+    )
+    assert parsed["available"] is True
+    assert parsed["energy_service"] == "no_service"
+    assert parsed["has_solar"] is False
+    assert parsed["batteries"] == [{"generation": "GEN1", "variant": "SINGLE"}]
+
+
+def test_location_reads_planned_batteries_and_solar():
+    parsed = v2.parse_location(_site(5, 3, msg(1, _battery(2, 2)), caps=num(1, 1)))
+    assert parsed["energy_service"] == "active"
+    assert parsed["has_solar"] is True
+    assert parsed["batteries"] == [{"generation": "GEN3", "variant": "DUAL"}]
+
+
+def test_location_unknown_enums_and_empty_reply():
+    parsed = v2.parse_location(_site(None, 5, msg(4, _battery(9, 9))))
+    assert parsed["energy_service"] is None
+    assert parsed["batteries"] == [{"generation": None, "variant": None}]
+    assert v2.parse_location(b"") == v2.empty_location()
+
+
+def test_energy_account_reads_the_last_bill_amount():
+    parsed = v2.parse_energy_account(_summary(1, num(4, 18853) + num(5, 0)))
+    assert parsed["last_bill_amount_cents"] == 18853
+    assert v2.parse_energy_account(_summary(2, num(4, 500)))["last_bill_amount_cents"] is None
+
+
+def test_overview_hours_keep_the_late_hour_from_yesterday():
+    start = 1_800_000_000
+    late = msg(4, ts(1, start - 3600) + dbl(2, 1.3) + dbl(3, 0.2))
+    today = msg(4, ts(1, start) + dbl(2, 0.7))
+    parsed = v2.parse_daily_overview(late + today, start, start + 86400)
+    assert parsed["energy_today"]["grid_to_home_kwh"] == 0.7
+    assert parsed["hours"] == [
+        {"start": start - 3600, "home_kwh": 1.3, "solar_kwh": 0.2},
+        {"start": start, "home_kwh": 0.7, "solar_kwh": 0.0},
+    ]
+
+
+def test_legacy_billing_reads_last_bill_next_to_spend_so_far():
+    api = sys.modules[_PKG + ".api"]
+    parsed = api.BasePowerApiClient._parse_billing_metadata(
+        bytes.fromhex("0a0a080210a5930118b0880212020802")
+    )
+    assert parsed["amount_cents"] == 18853
+    assert parsed["last_bill_cents"] == 33840

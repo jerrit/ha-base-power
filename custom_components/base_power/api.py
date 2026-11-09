@@ -384,7 +384,11 @@ def _parse_first_location_id(data: bytes) -> str | None:
 
 
 def _parse_billing_fields(data: bytes, result: dict[str, Any], *, nested: bool = False) -> None:
-    """Read amount_cents and due_date from a billing message."""
+    """Read amount_cents, last_bill_cents, and due_date from a billing message.
+
+    In the nested message field 2 is spend so far this cycle and field 3 is
+    the last bill. Field 3 as text is a due date.
+    """
     offset = 0
     while offset < len(data):
         tag_val, new_offset = _decode_varint(data, offset)
@@ -398,6 +402,8 @@ def _parse_billing_fields(data: bytes, result: dict[str, Any], *, nested: bool =
             val, offset = _decode_varint(data, offset)
             if field_num == 2 and result.get("amount_cents") is None:
                 result["amount_cents"] = val
+            elif field_num == 3 and result.get("last_bill_cents") is None:
+                result["last_bill_cents"] = val
         elif wire_type == 2:
             length, offset = _decode_varint(data, offset)
             if offset + length > len(data):
@@ -715,6 +721,18 @@ class BasePowerApiClient:
             service=f"{api_v2.V2_PACKAGE}.BillingService",
         )
         return api_v2.parse_energy_account(data)
+
+    async def get_location(self, address_id: str) -> dict[str, Any]:
+        """Energy service, solar, and battery models for the site."""
+        from . import api_v2
+
+        data = await self._call(
+            "GetLocation",
+            api_v2.encode_address_request(address_id),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.LocationsService",
+        )
+        return api_v2.parse_location(data)
 
     async def get_current_billing_cycle(self, address_id: str) -> dict[str, Any]:
         """Bill so far and projected bill for the energy account."""
@@ -1218,9 +1236,11 @@ class BasePowerApiClient:
         Some accounts return amount_cents as a top-level field 2 varint.
         Others wrap it in a field 1 sub-message, for example
         0a0a080210a5930118b0880212020802 → field 2 = 18853 ($188.53).
+        That message's field 3 is the last bill, 33840 ($338.40).
         """
         result: dict[str, Any] = {
             "amount_cents": None,
+            "last_bill_cents": None,
             "due_date": None,
         }
         if not data:

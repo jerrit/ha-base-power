@@ -5,7 +5,7 @@ runs every 10 minutes, and on every 60-second poll while something points
 to an outage. The coordinator refresh is the 15-minute usage tier: the v2
 daily overview, with RecentUsage and UsageEnergy only as fallbacks. It does
 not repeat the 60-second calls. Dashboard, Wi-Fi, billing, usage cycles,
-and the billing cycle are the 6-hour tier.
+the billing cycle, and the location are the 6-hour tier.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .api_v2 import (
     empty_battery_account,
     empty_billing_cycle,
     empty_energy_account,
+    empty_location,
     empty_overview,
 )
 from .auth import AuthenticationError
@@ -45,6 +46,7 @@ SLOW_METHODS = (
     "GetCurrentBillingCycle",
     "GetAccount",
     "ListAccounts",
+    "GetLocation",
 )
 
 
@@ -96,7 +98,11 @@ class PollState:
         self.energy: dict[str, Any] = _empty_energy()
         # Local midnight (Unix seconds) of the day self.energy belongs to.
         self.energy_day: int | None = None
-        self.billing: dict[str, Any] = {"amount_cents": None, "due_date": None}
+        self.billing: dict[str, Any] = {
+            "amount_cents": None,
+            "last_bill_cents": None,
+            "due_date": None,
+        }
         self.cycles: dict[str, Any] = {"asset_id": None, "cycle_start": None}
         self.overview: dict[str, Any] = empty_overview()
         # "overview" or "legacy" for the last 15-minute usage and today's energy
@@ -105,6 +111,7 @@ class PollState:
         self.billing_cycle: dict[str, Any] = empty_billing_cycle()
         self.battery_account: dict[str, Any] = empty_battery_account()
         self.energy_account: dict[str, Any] = empty_energy_account()
+        self.location: dict[str, Any] = empty_location()
 
     def slow_due(self, now: float, *, first: bool) -> bool:
         """Slow tier on startup, every 6 hours, or while the numeric id is missing.
@@ -218,6 +225,15 @@ async def refresh_slow(
         _LOGGER.debug("Energy account fetch failed: %s", err)
     else:
         state.energy_account = _keep(state.energy_account, energy_account)
+    try:
+        location = await api.get_location(address_id)
+    except AuthenticationError:
+        raise
+    except Exception as err:
+        _LOGGER.debug("Location fetch failed: %s", err)
+    else:
+        if location and location.get("available"):
+            state.location = location
     state.mark_slow(now)
 
 

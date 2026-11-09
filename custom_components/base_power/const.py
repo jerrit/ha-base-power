@@ -59,6 +59,31 @@ HARDWARE_SKU_CAPACITY: dict[str, tuple[int, float]] = {
     "BASE1_SINGLE": (1, 39.2),
     "BASE1_DUAL": (2, 78.4),
 }
+# Battery models from the site's location, used when the SKU is missing.
+# Only GEN1 is mapped: it matches the GRO SKUs. What GEN3 stands for is not
+# confirmed yet, so it falls back to the saved capacity.
+BATTERY_MODEL_CAPACITY: dict[tuple[str, str], tuple[int, float]] = {
+    ("GEN1", "SINGLE"): (1, 25),
+    ("GEN1", "DUAL"): (2, 50),
+    ("GEN1", "WALL"): (1, 20),
+}
+
+
+def battery_model_capacity(batteries: list[dict[str, str | None]]) -> tuple[int, float] | None:
+    """Add up (units, kWh) for the listed batteries. None if any is unknown."""
+    if not batteries:
+        return None
+    units = 0
+    kwh = 0.0
+    for battery in batteries:
+        known = BATTERY_MODEL_CAPACITY.get((battery.get("generation"), battery.get("variant")))
+        if known is None:
+            return None
+        units += known[0]
+        kwh += known[1]
+    return units, round(kwh, 1)
+
+
 # Legacy fallback for installs that still store an integer unit count.
 BATTERY_CAPACITY_PER_UNIT_KWH = 25
 DEFAULT_BATTERY_COUNT = 1
@@ -91,6 +116,16 @@ CONF_EMAIL = "email"
 CONF_WIFI_SSID = "wifi_ssid"
 CONF_BATTERY_COUNT = "battery_count_override"
 CONF_BATTERY_CAPACITY = "battery_capacity"
+
+# Running energy totals, saved across restarts
+STORAGE_VERSION = 1
+def totals_store_key(entry_id: str) -> str:
+    """Storage key for one config entry's running totals."""
+    return f"base_power.{entry_id}.totals"
+
+
+# Hours already counted, kept this long so a late hour is counted once.
+COUNTED_HOURS_KEEP_SECONDS = 48 * 3600
 
 # Platforms
 PLATFORMS = ["sensor", "binary_sensor", "select"]

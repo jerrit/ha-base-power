@@ -71,6 +71,8 @@ def _compose(
             coordinator._config_entry = types.SimpleNamespace(options={})
             coordinator._prev_soc = None
             coordinator._poll = poll.PollState()
+            coordinator._totals = coordinator_mod.EnergyTotals()
+            coordinator._totals_store = None
             coordinator._poll.energy = {
                 "grid_to_home_kwh": energy_grid,
                 "solar_to_home_kwh": energy_solar,
@@ -231,6 +233,8 @@ async def _coordinator(hass):
     coordinator._config_entry = types.SimpleNamespace(options={})
     coordinator._prev_soc = None
     coordinator._poll = poll.PollState()
+    coordinator._totals = coordinator_mod.EnergyTotals()
+    coordinator._totals_store = None
     coordinator._poll.numeric_id = 7
     coordinator._poll.mark_slow(coordinator._monotonic())
     coordinator._grid = _grid(api, volts=245.0)
@@ -348,7 +352,7 @@ def test_grid_power_data_records_the_battery_state_behind_an_off_state():
     assert _compose("on_grid")["grid"]["battery_state"] == "on_grid"
 
 
-def _capacity(options, sku):
+def _capacity(options, sku, batteries=None, hours=None):
     coordinator_mod, api, v2, poll = _modules()
 
     async def run():
@@ -360,11 +364,21 @@ def _capacity(options, sku):
             coordinator._config_entry = types.SimpleNamespace(options=options)
             coordinator._prev_soc = None
             coordinator._poll = poll.PollState()
+            coordinator._totals = coordinator_mod.EnergyTotals()
+            coordinator._totals_store = None
             coordinator._poll.battery_account = {"plan_name": None, "hardware_sku": sku,
                                                  "equipment_description": None}
+            if batteries is not None:
+                coordinator._poll.location = dict(v2.empty_location(), available=True,
+                                                  batteries=batteries)
+            if hours is not None:
+                coordinator._poll.overview = dict(v2.empty_overview(), available=True, hours=hours)
+                coordinator._update_totals()
             coordinator._grid = _grid(api, volts=245.0)
             coordinator._snapshot = v2.empty_snapshot()
             data = coordinator._compose()
+            if hours is not None:
+                return data["derived"]
             return data["dashboard"], data["derived"]["capacity_kwh"]
         finally:
             await hass.async_stop(force=True)
@@ -454,3 +468,38 @@ def test_event_list_still_turns_grid_support_on():
 def test_grid_support_is_unknown_without_any_data():
     data = _compose("on_grid", storage_kw=None)
     assert data["derived"]["grid_support_active"] is None
+
+
+def _models(*pairs):
+    return [{"generation": g, "variant": v} for g, v in pairs]
+
+
+def test_battery_model_fills_capacity_without_a_sku():
+    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, None, _models(("GEN1", "DUAL")))
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (50, 2, "model")
+    dashboard, kwh = _capacity({}, None, _models(("GEN1", "SINGLE"), ("GEN1", "SINGLE")))
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (50, 2, "model")
+    dashboard, kwh = _capacity({}, None, _models(("GEN1", "WALL")))
+    assert (kwh, dashboard["capacity_source"]) == (20, "model")
+
+
+def test_known_sku_wins_over_the_battery_model():
+    dashboard, kwh = _capacity({}, "GRO_SINGLE", _models(("GEN1", "DUAL")))
+    assert (kwh, dashboard["capacity_source"], dashboard["model_capacity_kwh"]) == (25, "sku", 50)
+
+
+def test_unconfirmed_models_fall_back_to_the_saved_capacity():
+    for models in (_models(("GEN3", "SINGLE")), _models(("GEN1", "SINGLE"), (None, None)), []):
+        dashboard, kwh = _capacity({"battery_capacity": "40 kWh (1 Core)"}, None, models)
+        assert (kwh, dashboard["capacity_source"]) == (40, "option")
+        assert dashboard["model_capacity_kwh"] is None
+
+
+def test_running_totals_include_every_hour_and_start_unknown():
+    derived = _capacity({}, "GRO_SINGLE", hours=[])
+    assert derived["home_usage_total_kwh"] is None
+    derived = _capacity({}, "GRO_SINGLE", hours=[
+        {"start": 1_800_000_000 - 3600, "home_kwh": 1.3, "solar_kwh": 0.0},
+        {"start": 1_800_000_000, "home_kwh": 0.7, "solar_kwh": 0.25},
+    ])
+    assert (derived["home_usage_total_kwh"], derived["solar_total_kwh"]) == (2.0, 0.25)

@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.storage import Store
 
 from .api import BasePowerApiClient
 from .auth import BasePowerAuth
@@ -22,6 +23,8 @@ from .const import (
     CONF_SESSION_JWT,
     CONF_SERVICE_LOCATION_ID,
     GRID_SCAN_INTERVAL_SECONDS,
+    STORAGE_VERSION,
+    totals_store_key,
 )
 from .coordinator import BasePowerCoordinator
 
@@ -52,6 +55,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         config_entry=entry,
     )
 
+    await coordinator.async_load_totals()
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
@@ -82,3 +86,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await clerk_session.close()
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete the saved energy totals when the integration is removed."""
+    await Store(hass, STORAGE_VERSION, totals_store_key(entry.entry_id)).async_remove()

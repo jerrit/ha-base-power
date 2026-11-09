@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
@@ -22,6 +23,9 @@ from .const import (
     CONF_BATTERY_COUNT,
     CONF_BATTERY_CAPACITY,
     HARDWARE_SKU_CAPACITY,
+    STORAGE_VERSION,
+    battery_model_capacity,
+    totals_store_key,
     resolve_battery_capacity,
 )
 from .poll import (
@@ -31,6 +35,7 @@ from .poll import (
     refresh_slow,
     refresh_usage,
 )
+from .totals import EnergyTotals
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +69,20 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._prev_soc: float | None = None
         self._snapshot: dict[str, Any] = empty_snapshot()
         self._polls_since_snapshot = 0
+        self._totals = EnergyTotals()
+        self._totals_store: Store | None = None
+
+    async def async_load_totals(self) -> None:
+        """Load the running energy totals saved before the last restart."""
+        entry_id = getattr(self._config_entry, "entry_id", self.service_location_id)
+        self._totals_store = Store(self.hass, STORAGE_VERSION, totals_store_key(entry_id))
+        self._totals = EnergyTotals.from_dict(await self._totals_store.async_load())
+
+    def _update_totals(self) -> None:
+        """Add new hours from the overview and save when they change."""
+        hours = (self._poll.overview or {}).get("hours") or []
+        if self._totals.add_hours(hours, time.time()) and self._totals_store is not None:
+            self._totals_store.async_delay_save(self._totals.as_dict, 30)
 
     @property
     def _numeric_service_location_id(self) -> int | None:
@@ -90,6 +109,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.service_location_id,
                     self._time_zone(),
                 )
+                self._update_totals()
             if include_fast_on_coordinator_refresh(first):
                 self._grid = await self._async_fetch_grid(self._poll.numeric_id)
                 self._snapshot = await self._async_fetch_snapshot()
@@ -244,12 +264,17 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         resolved = resolve_battery_capacity(options.get(CONF_BATTERY_CAPACITY))
         sku = (self._poll.battery_account or {}).get("hardware_sku")
         detected = HARDWARE_SKU_CAPACITY.get(sku) if sku else None
-        # A known SKU wins. The settings form pre-fills a capacity, so a saved
-        # value may never have been chosen on purpose. The saved option covers
-        # unknown SKUs and a missing battery account.
+        location = self._poll.location or {}
+        model = battery_model_capacity(location.get("batteries") or [])
+        # A known SKU wins, then the battery model from the site's location.
+        # The settings form pre-fills a capacity, so a saved value may never
+        # have been chosen on purpose. The saved option covers the rest.
         if detected is not None:
             units, kwh = detected
             source = "sku"
+        elif model is not None:
+            units, kwh = model
+            source = "model"
         elif resolved is not None:
             units, kwh = resolved
             source = "option"
@@ -266,6 +291,8 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         dashboard["capacity_source"] = source
         dashboard["hardware_sku"] = sku
         dashboard["detected_capacity_kwh"] = detected[1] if detected else None
+        dashboard["model_capacity_kwh"] = model[1] if model else None
+        dashboard["batteries"] = location.get("batteries") or []
 
         energy = dict(self._poll.energy)
         usage = self._poll.usage
@@ -309,8 +336,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             derived["self_sufficiency_percent"] = 0.0
         else:
             derived["self_sufficiency_percent"] = None
-        if not dashboard.get("has_solar") and solar_kwh > 0:
+        if not dashboard.get("has_solar") and (solar_kwh > 0 or location.get("has_solar")):
             dashboard["has_solar"] = True
+        totals = self._totals
+        derived["home_usage_total_kwh"] = round(totals.home_kwh, 3) if totals.started else None
+        derived["solar_total_kwh"] = round(totals.solar_kwh, 3) if totals.started else None
         intervals = overview.get("grid_support") or []
         derived["grid_support_events_24h"] = len(intervals) if overview.get("available") else None
         scheduled = (
@@ -342,6 +372,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "billing_cycle": self._poll.billing_cycle,
             "battery_account": self._poll.battery_account,
             "energy_account": self._poll.energy_account,
+            "location": location,
             "sources": {
                 "usage": self._poll.usage_source,
                 "energy": self._poll.energy_source,

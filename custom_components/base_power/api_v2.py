@@ -110,6 +110,74 @@ def parse_locations(data: bytes) -> list[dict[str, str]]:
     return locations
 
 
+# Location.energy oneof: field number → state name
+ENERGY_SERVICE_STATES: dict[int, str] = {
+    1: "unknown",
+    2: "no_service",
+    3: "planned",
+    4: "activating",
+    5: "active",
+    6: "ending",
+    7: "ended",
+}
+# Location.battery oneof states that list batteries, and that list's field
+_BATTERY_LIST_FIELD: dict[int, int] = {3: 1, 4: 1, 5: 4}  # planned, activating, onsite
+BATTERY_GENERATIONS: dict[int, str] = {1: "GEN1", 2: "GEN3"}
+BATTERY_VARIANTS: dict[int, str] = {1: "SINGLE", 2: "DUAL", 3: "WALL"}
+
+
+def empty_location() -> dict[str, Any]:
+    return {
+        "available": False,
+        "energy_service": None,
+        "has_solar": None,
+        "batteries": [],
+    }
+
+
+def parse_location(data: bytes) -> dict[str, Any]:
+    """Parse GetLocationResponse. Reads only energy service, solar, and battery models.
+
+    location (1): 2 energy (oneof, see ENERGY_SERVICE_STATES), 3 battery
+    (oneof; planned and activating list batteries in field 1, onsite in
+    field 4), 4 capabilities {1 has_solar, 2 billing}. Each battery is
+    {1 hardware_device_id, 2 generation, 3 variant}. The address and
+    referral fields are skipped.
+    """
+    result = empty_location()
+    location = next((v for f, k, v in _iter_fields(data) if f == 1 and k == "bytes"), None)
+    if location is None:
+        return result
+    result["available"] = True
+    for field_num, kind, value in _iter_fields(location):
+        if kind != "bytes":
+            continue
+        if field_num == 2:
+            state = next((f for f, k, _ in _iter_fields(value) if k == "bytes"), None)
+            result["energy_service"] = ENERGY_SERVICE_STATES.get(state) if state else None
+        elif field_num == 3:
+            for state_num, state_kind, state_value in _iter_fields(value):
+                list_field = _BATTERY_LIST_FIELD.get(state_num)
+                if list_field is None or state_kind != "bytes":
+                    continue
+                for sub_num, sub_kind, battery in _iter_fields(state_value):
+                    if sub_num != list_field or sub_kind != "bytes":
+                        continue
+                    numbers = {f: v for f, k, v in _iter_fields(battery) if k == "varint"}
+                    result["batteries"].append(
+                        {
+                            "generation": BATTERY_GENERATIONS.get(numbers.get(2, 0)),
+                            "variant": BATTERY_VARIANTS.get(numbers.get(3, 0)),
+                        }
+                    )
+        elif field_num == 4:
+            # Proto3 leaves out false, so a present message without it means False.
+            numbers = {f: v for f, k, v in _iter_fields(value) if k == "varint"}
+            result["has_solar"] = bool(numbers.get(1, 0))
+    _LOGGER.debug("Location parsed: %s", result)
+    return result
+
+
 def empty_snapshot() -> dict[str, Any]:
     return {
         "available": False,
@@ -170,6 +238,7 @@ def empty_overview() -> dict[str, Any]:
         "cost_currency": None,
         "home_power": [],
         "energy_today": None,
+        "hours": [],
     }
 
 
@@ -196,6 +265,9 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
     kW as kwh (kW / 4) and watts (kW * 1000). energy_today sums the hourly
     samples in [start, end), the same as MobileGetUsageEnergy. Its
     grid_to_home_kwh is home load, like the older call's "load" field.
+
+    hours lists every hourly sample in the reply, today or not. Base posts
+    the last hour of a day after midnight, so only this list still has it.
     """
     result = empty_overview()
     if not data:
@@ -223,12 +295,12 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
             home = numbers.get(2, 0.0)
             solar = numbers.get(3, 0.0)
             # A non-finite sample is dropped, so a bad hour cannot publish NaN.
-            if (
-                stamp is not None
-                and start <= stamp < end
-                and math.isfinite(home)
-                and math.isfinite(solar)
-            ):
+            if stamp is None or not (math.isfinite(home) and math.isfinite(solar)):
+                continue
+            result["hours"].append(
+                {"start": stamp, "home_kwh": round(home, 4), "solar_kwh": round(solar, 4)}
+            )
+            if start <= stamp < end:
                 home_kwh += home
                 solar_kwh += solar
                 hours_today += 1
@@ -418,6 +490,7 @@ def empty_energy_account() -> dict[str, Any]:
         "amount_due_cents": None,
         "past_due": None,
         "outstanding_balance_cents": None,
+        "last_bill_amount_cents": None,
         "next_bill_date": None,
         "next_autopay_date": None,
     }
@@ -426,8 +499,8 @@ def empty_energy_account() -> dict[str, Any]:
 def parse_energy_account(data: bytes) -> dict[str, Any]:
     """Parse ListAccountsResponse and read the energy account's summary.
 
-    accounts (1, repeated AccountSummary): 1 account_type, 5 outstanding
-    balance cents, 7 next autopay date, 8 next bill date, 10 oldest open
+    accounts (1, repeated AccountSummary): 1 account_type, 4 last bill
+    amount cents, 5 outstanding balance cents, 7 next autopay date, 8 next bill date, 10 oldest open
     obligation {3 original amount cents, 4 due_at, 7 past_due}. Timestamps
     are UTC seconds. All None when there is no energy account, such as a
     home not billed by Base for energy. No open obligation means nothing is
@@ -444,7 +517,9 @@ def parse_energy_account(data: bytes) -> dict[str, Any]:
         result["outstanding_balance_cents"] = 0
         result["past_due"] = False
         for sub_num, sub_kind, value in fields:
-            if sub_num == 5 and sub_kind == "varint":
+            if sub_num == 4 and sub_kind == "varint":
+                result["last_bill_amount_cents"] = _int64(value)
+            elif sub_num == 5 and sub_kind == "varint":
                 result["outstanding_balance_cents"] = _int64(value)
             elif sub_num == 7 and sub_kind == "bytes":
                 result["next_autopay_date"] = _timestamp_seconds(value)

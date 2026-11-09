@@ -135,6 +135,12 @@ class RecordingApi:
                                                 "next_bill_date": None,
                                                 "next_autopay_date": None})
 
+    async def get_location(self, address):
+        return await self._hit("GetLocation", {"available": True, "energy_service": "active",
+                                               "has_solar": False,
+                                               "batteries": [{"generation": "GEN1",
+                                                              "variant": "SINGLE"}]})
+
 
 def test_steady_state_is_under_135_calls_per_hour():
     per_hour = _poll.steady_state_calls_per_hour()
@@ -145,7 +151,7 @@ def test_steady_state_is_under_135_calls_per_hour():
     assert fast == 120
     assert snapshot == 6
     assert usage == 4
-    assert abs(slow - 7 / 6) < 1e-9
+    assert abs(slow - 8 / 6) < 1e-9
     assert per_hour == fast + snapshot + usage + slow
     assert per_hour < 135
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.
@@ -233,6 +239,7 @@ def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
     assert state.energy["grid_to_home_kwh"] == 3.0
     assert state.billing["amount_cents"] == 100
     assert state.wifi["ssid"] == "Home"
+    assert state.location["available"] is False
     assert api.calls[-2:] == ["MobileGetServiceContext", "MobileGetGridStatus"]
 
 
