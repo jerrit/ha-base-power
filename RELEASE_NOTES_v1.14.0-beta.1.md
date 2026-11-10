@@ -10,6 +10,8 @@ This is a beta. To get it, open Base Power in the Marketplace and turn on pre-re
 - **Home Usage (Total)** and, on homes with solar, **Solar to Home (Total)**. These running totals never reset at midnight. Each hour is counted once, whenever Base posts it, and the count survives restarts. They start with the last 24 hours. Use them in the Energy Dashboard in place of the daily sensors.
 - **Battery model.** When Base doesn't report a hardware SKU, System Capacity now uses the battery model Base lists for the site (`capacity_source: model`). Battery Hardware shows it in a `battery_models` attribute.
 - **Picking a site during setup.** If your account has more than one site, setup lists them by street address and you pick one.
+- **Grid Voltage** sensor. Voltage used to be only an attribute on the Grid Power binary sensor.
+- **Power from Grid**, **Battery Power**, and, on homes with solar, **Solar Power**: live power in watts, updated every minute. Power from Grid is negative while exporting. Battery Power is positive while the battery discharges.
 - **Solar Connected** also turns on when Base lists solar for your site.
 
 ### Changes
@@ -18,6 +20,7 @@ This is a beta. To get it, open Base Power in the Marketplace and turn on pre-re
 ### Please check
 - If you use the Energy Dashboard, switch Grid consumption to **Home Usage (Total)** and Solar to **Solar to Home (Total)**.
 - If you get energy from Base, compare **Last Bill Amount** with your last invoice.
+- Watch **Battery Power** while the battery charges and tell us in an issue whether it goes negative. That isn't confirmed yet.
 - Open Battery Hardware and look at `battery_models`. If you have two batteries, a Wall, or Base Core, please share what it shows in an issue. Those models aren't confirmed yet.
 
 Restart Home Assistant after updating.

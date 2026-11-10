@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -13,6 +14,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     UnitOfElectricCurrent,
+    UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
     UnitOfTime,
@@ -77,11 +79,17 @@ async def async_setup_entry(
         BasePowerBillingCycleSensor(coordinator, entry, "projected_charges_cents", "Projected Bill", "mdi:cash-fast"),
         BasePowerBillingCycleSensor(coordinator, entry, "solar_credit_cents", "Solar Buyback Credit", "mdi:cash-plus"),
         BasePowerRunningTotalSensor(coordinator, entry, "home_usage_total_kwh", "home_usage_total", "Home Usage (Total)", "mdi:home-lightning-bolt"),
+        BasePowerGridVoltageSensor(coordinator, entry),
+        BasePowerLivePowerSensor(coordinator, entry, "power_from_grid_kw", "power_from_grid", "Power from Grid", "mdi:transmission-tower"),
+        BasePowerLivePowerSensor(coordinator, entry, "power_from_storage_kw", "battery_power", "Battery Power", "mdi:home-battery"),
     ]
     data = coordinator.data or {}
     if (data.get("dashboard") or {}).get("has_solar"):
         entities.append(
             BasePowerRunningTotalSensor(coordinator, entry, "solar_total_kwh", "solar_to_home_total", "Solar to Home (Total)", "mdi:solar-power")
+        )
+        entities.append(
+            BasePowerLivePowerSensor(coordinator, entry, "power_from_solar_kw", "solar_power", "Solar Power", "mdi:solar-power")
         )
 
     # A site without Base energy service has no energy bills. Leave out the
@@ -994,6 +1002,75 @@ class BasePowerRunningTotalSensor(BasePowerSensorBase):
         if self.coordinator.data:
             return self.coordinator.data.get("derived", {}).get(self._key)
         return None
+
+
+def _finite_number(value: Any) -> float | None:
+    """Return value as a float, or None when it is missing, a bool, or not finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return float(value)
+
+
+class BasePowerGridVoltageSensor(BasePowerSensorBase):
+    """Grid voltage from the 60-second grid poll."""
+
+    _attr_name = "Grid Voltage"
+    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+    _attr_device_class = SensorDeviceClass.VOLTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:sine-wave"
+
+    def __init__(self, coordinator: BasePowerCoordinator, entry: ConfigEntry) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_grid_voltage"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the latest grid voltage. Unknown when Base sent none."""
+        if not self.coordinator.data:
+            return None
+        volts = _finite_number((self.coordinator.data.get("grid") or {}).get("voltage_volts"))
+        return round(volts, 1) if volts is not None else None
+
+
+class BasePowerLivePowerSensor(BasePowerSensorBase):
+    """Live power flow in watts from the 60-second grid poll.
+
+    Base sends kW. Power from Grid is negative while exporting. Battery
+    Power is positive while the battery discharges.
+    """
+
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: BasePowerCoordinator,
+        entry: ConfigEntry,
+        key: str,
+        unique_key: str,
+        name: str,
+        icon: str,
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._key = key
+        self._attr_name = name
+        self._attr_icon = icon
+        self._attr_unique_id = f"{entry.data[CONF_SERVICE_LOCATION_ID]}_{unique_key}"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return watts. Unknown when the power flow is missing."""
+        if not self.coordinator.data:
+            return None
+        kw = _finite_number((self.coordinator.data.get("grid") or {}).get(self._key))
+        return round(kw * 1000) if kw is not None else None
 
 
 # Sensors that only apply to homes billed by Base for energy

@@ -89,6 +89,10 @@ Already installed through HACS? Home Assistant 2026.11 moves it to the Marketpla
 | Total Home Energy | Everything the house used today. Same value as Home Usage Today (All Sources) | kWh |
 | Self-Sufficiency | % of home usage covered by solar + battery, capped at 100 | % |
 | Grid Current | Grid kW × 1000 ÷ volts. Negative means export | A |
+| Grid Voltage | Latest grid voltage, updated every minute | V |
+| Power from Grid | Live power drawn from the grid. Negative means export | W |
+| Battery Power | Live battery power. Positive means the battery is discharging | W |
+| Solar Power | Live solar output. Only on homes with solar | W |
 | Daily Total (Home Usage) | Same value as Home Usage Today (All Sources) | kWh |
 | Daily Average Grid Interval | Today's usage total ÷ intervals today | kWh |
 | Battery State | On grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable. Attributes show `observed_at`, and off grid, `state_of_energy_percent` and `overcurrent_limit_kw` | — |
@@ -184,6 +188,7 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Daily Total (Home Usage).** Same value as Home Usage Today. Unknown when that sum is missing.
 - **Daily Average Grid Interval.** Today's usage total divided by the number of 15-minute intervals today. Unknown when today has no intervals.
 - **Grid Current.** `power_from_grid_kw * 1000 / voltage_volts` when voltage is above 0. Negative power is export and stays negative. Unknown when either reading is missing.
+- **Grid Voltage, Power from Grid, Battery Power, Solar Power.** Read from the same 60-second service-context and grid-voltage poll as Grid Current, so they add no API calls. Base sends kW; the sensors show watts. Unknown when Base sends no reading. Battery Power is Base's `from_storage` flow. Discharging is positive. The sign while charging is not confirmed yet.
 - **Capacity.** Detected from the battery SKU, then from the battery model. The Battery Capacity setting (20, 25, 40, 50, or 80 kWh) is used when neither is known. `capacity_source` shows which one is in use (`sku`, `model`, `option`, or `default`).
 
 A separate Shiner app API was not investigated. Wi-Fi signal is reported for the SSID each user selects.
@@ -197,6 +202,7 @@ A separate Shiner app API was not investigated. Wi-Fi signal is reported for the
 - System Capacity falls back to the battery model Base reports when the SKU is missing (`capacity_source: model`). Battery Hardware shows the model in `battery_models`.
 - Solar Connected also turns on when Base lists solar for the site.
 - Setup lists your sites and lets you pick one when the account has more than one.
+- Adds **Grid Voltage** (V) and live **Power from Grid**, **Battery Power**, and, on homes with solar, **Solar Power** (W). Voltage was only an attribute on the Grid Power binary sensor before.
 
 ### v1.13.2
 - Fixed Total Home Energy and Self-Sufficiency showing "unknown" for about an hour after midnight. They now show 0 after the reset and climb once Base posts the first hour.

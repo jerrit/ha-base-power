@@ -27,8 +27,9 @@ def _sensor_module():
     return importlib.import_module("custom_components.base_power.sensor")
 
 
-def _data(energy_service, *, has_solar=False, last_bill=None, legacy_last_bill=None, cost=None):
+def _data(energy_service, *, has_solar=False, last_bill=None, legacy_last_bill=None, cost=None, grid=None):
     return {
+        "grid": grid or {},
         "dashboard": {"has_solar": has_solar},
         "derived": {"home_usage_total_kwh": 12.5, "solar_total_kwh": 1.0},
         "energy": {},
@@ -120,3 +121,33 @@ def test_solar_total_only_for_solar_sites():
     entities, _ = _setup(_data("active", has_solar=True))
     assert entities["solar_to_home_total"].native_value == 1.0
     assert entities["home_usage_total"].native_value == 12.5
+
+
+def test_live_power_sensors_convert_kw_to_watts():
+    grid = {
+        "voltage_volts": 241.37,
+        "power_from_grid_kw": -1.2345,
+        "power_from_storage_kw": 0.75,
+        "power_from_solar_kw": 3.1,
+    }
+    entities, _ = _setup(_data("active", has_solar=True, grid=grid))
+    assert entities["grid_voltage"].native_value == 241.4
+    assert entities["grid_voltage"].native_unit_of_measurement == "V"
+    assert entities["power_from_grid"].native_value == -1234
+    assert entities["battery_power"].native_value == 750
+    assert entities["solar_power"].native_value == 3100
+    assert entities["power_from_grid"].native_unit_of_measurement == "W"
+
+
+def test_live_power_sensors_unknown_when_missing_or_not_finite():
+    grid = {"voltage_volts": float("nan"), "power_from_grid_kw": None, "power_from_storage_kw": True}
+    entities, _ = _setup(_data("active", grid=grid))
+    assert entities["grid_voltage"].native_value is None
+    assert entities["power_from_grid"].native_value is None
+    assert entities["battery_power"].native_value is None
+
+
+def test_solar_power_only_for_solar_sites():
+    entities, _ = _setup(_data("active"))
+    assert "solar_power" not in entities
+    assert {"grid_voltage", "power_from_grid", "battery_power"} <= set(entities)
