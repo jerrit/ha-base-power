@@ -12,7 +12,7 @@ CLERK_DOMAIN = "https://clerk.basepowercompany.com"
 CLERK_JS_VERSION = "5"
 
 # Polling intervals (seconds).
-# Steady state is about 131 calls/hour:
+# Steady state is about 132 calls/hour:
 #   every 60 s, ServiceContext + GridStatus (120/hour)
 #   every 10 min, the v2 battery snapshot (6/hour). Every 60 s while the
 #     outage flag, voltage, or the last snapshot points to an outage.
@@ -20,10 +20,12 @@ CLERK_JS_VERSION = "5"
 #     run only when the overview fails or lacks that data.
 #   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles
 #     + v2 CurrentBillingCycle + v2 battery GetAccount + v2 ListAccounts
-#     (about 1/hour)
+#     + v2 GetLocation + v2 GetDailyEnergy (about 1.5/hour). After a failed
+#     call this tier runs again 15 minutes later.
 # The v2 GetRecentGridVoltage runs only when GridStatus has no voltage.
 # The coordinator interval is the 15-minute tier. It does not repeat the
 # 60-second grid calls.
+REQUEST_TIMEOUT_SECONDS = 20
 GRID_SCAN_INTERVAL_SECONDS = 60
 USAGE_SCAN_INTERVAL_SECONDS = 15 * 60
 SLOW_SCAN_INTERVAL_SECONDS = 6 * 60 * 60
@@ -124,8 +126,20 @@ def totals_store_key(entry_id: str) -> str:
     return f"base_power.{entry_id}.totals"
 
 
-# Hours already counted, kept this long so a late hour is counted once.
-COUNTED_HOURS_KEEP_SECONDS = 48 * 3600
+# Hours already counted, kept this long so a late hour is counted once and a
+# finished day can be checked against Base's daily total.
+COUNTED_HOURS_KEEP_SECONDS = 40 * 86400
+# Base's daily totals are asked for this far back. Base keeps about a month.
+DAILY_ENERGY_LOOKBACK_SECONDS = 34 * 86400
+# A day is checked against Base's daily total once it has been over this long.
+DAY_SETTLE_SECONDS = 6 * 3600
+# A smaller gap between Base's daily total and the counted hours is rounding.
+DAY_REPAIR_MIN_KWH = 0.05
+
+# The usage tier is stale after this many refreshes in a row with no new data.
+USAGE_STALE_AFTER_FAILURES = 4
+# Battery Charging stays on this long after the last rise in charge.
+CHARGING_HOLD_SECONDS = 3 * 3600
 
 # Platforms
-PLATFORMS = ["sensor", "binary_sensor", "select"]
+PLATFORMS = ["sensor", "binary_sensor"]

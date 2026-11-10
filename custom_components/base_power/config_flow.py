@@ -7,32 +7,30 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-
 from homeassistant import config_entries
-from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.const import CONF_EMAIL
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
 )
 
+from .api import BasePowerApiClient
+from .auth import AuthenticationError, BasePowerAuth
 from .const import (
-    DOMAIN,
-    CONF_CLIENT_TOKEN,
-    CONF_SESSION_ID,
-    CONF_SESSION_JWT,
-    CONF_SERVICE_LOCATION_ID,
-    CONF_WIFI_SSID,
-    CONF_BATTERY_COUNT,
-    CONF_BATTERY_CAPACITY,
     BATTERY_CAPACITY_OPTIONS,
+    CONF_BATTERY_CAPACITY,
+    CONF_BATTERY_COUNT,
+    CONF_CLIENT_TOKEN,
+    CONF_SERVICE_LOCATION_ID,
+    CONF_SESSION_ID,
+    CONF_WIFI_SSID,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_BATTERY_COUNT,
+    DOMAIN,
     canonical_battery_capacity,
 )
-from .api import BasePowerApiClient
-from .auth import BasePowerAuth, AuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,12 +59,9 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
 
         # Pull live WiFi scan from the running coordinator (no extra API call needed)
         scan: dict[str, int | None] = {}
-        try:
-            coordinator = self.hass.data[DOMAIN][self.config_entry.entry_id]
-            if coordinator.data:
-                scan = coordinator.data.get("wifi", {}).get("scan", {})
-        except (KeyError, AttributeError):
-            pass
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+        if coordinator is not None and coordinator.data:
+            scan = (coordinator.data.get("wifi") or {}).get("scan") or {}
 
         if scan:
             options: list[dict[str, str]] = []
@@ -81,14 +76,12 @@ class BasePowerOptionsFlow(config_entries.OptionsFlow):
             ssid_field = SelectSelector(
                 SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
             )
-            wifi_key = (
-                vol.Required(CONF_WIFI_SSID, default=current_ssid)
-                if current_ssid
-                else vol.Required(CONF_WIFI_SSID)
-            )
         else:
             ssid_field = str  # type: ignore[assignment]
-            wifi_key = vol.Optional(CONF_WIFI_SSID, default=current_ssid)
+        # Optional: Base normally reports the battery's network itself.
+        wifi_key = vol.Optional(
+            CONF_WIFI_SSID, description={"suggested_value": current_ssid or None}
+        )
 
         capacity_field = SelectSelector(
             SelectSelectorConfig(
@@ -128,7 +121,6 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._email_id: str = ""
         self._client_token: str = ""
         self._session_id: str = ""
-        self._session_jwt: str | None = None
         self._service_location_id: str = ""
         self._locations: list[dict[str, str]] = []
 
@@ -195,7 +187,6 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                     self._session_id = result["session_id"]
                     self._client_token = result["client_token"]
-                    self._session_jwt = result.get("session_jwt")
 
                     # During reauth, location ID is already known — skip discovery
                     if self._service_location_id:
@@ -209,12 +200,11 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     locations: list[dict[str, str]] = []
                     try:
                         auth = BasePowerAuth(
-                            session,
-                            self._client_token,
-                            self._session_id,
-                            self._session_jwt,
+                            session, self._client_token, self._session_id
                         )
                         jwt = await auth.async_ensure_valid_token()
+                        # Asking for the token can rotate the client token.
+                        self._client_token = auth.client_token
                         locations = await BasePowerApiClient.async_discover_locations(
                             session, jwt
                         )
@@ -291,7 +281,6 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_EMAIL: self._email,
                 CONF_CLIENT_TOKEN: self._client_token,
                 CONF_SESSION_ID: self._session_id,
-                CONF_SESSION_JWT: self._session_jwt,
                 CONF_SERVICE_LOCATION_ID: service_location_id,
             }
 

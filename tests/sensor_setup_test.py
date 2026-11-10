@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import sys
 import types
 from pathlib import Path
 
@@ -12,18 +11,13 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
-from homeassistant.core import HomeAssistant  # noqa: E402
-from homeassistant.helpers import frame  # noqa: E402
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import frame
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sensor_module():
-    components = sys.modules.get("custom_components")
-    if components is None or not hasattr(components, "__path__"):
-        components = types.ModuleType("custom_components")
-        components.__path__ = [str(_ROOT / "custom_components")]
-        sys.modules["custom_components"] = components
     return importlib.import_module("custom_components.base_power.sensor")
 
 
@@ -54,7 +48,7 @@ class FakeRegistry:
         del self.entities[entity_id]
 
 
-def _setup(data, preexisting=()):
+def _setup(data, preexisting=(), listeners=None):
     sensor = _sensor_module()
 
     async def run():
@@ -64,10 +58,23 @@ def _setup(data, preexisting=()):
             registry = FakeRegistry(f"loc-1_{unique}" for unique in preexisting)
             original = sensor.er
             sensor.er = types.SimpleNamespace(async_get=lambda _hass: registry)
-            entry = types.SimpleNamespace(entry_id="e1", data={"service_location_id": "loc-1"}, options={})
-            coordinator = types.SimpleNamespace(data=data)
-            hass.data["base_power"] = {"e1": coordinator}
             added = []
+
+            def add_listener(update):
+                if listeners is not None:
+                    listeners.append((update, coordinator, added))
+                return lambda: None
+
+            coordinator = types.SimpleNamespace(
+                data=data, usage_stale=False, async_add_listener=add_listener
+            )
+            entry = types.SimpleNamespace(
+                entry_id="e1",
+                data={"service_location_id": "loc-1"},
+                options={},
+                runtime_data=coordinator,
+                async_on_unload=lambda _unsub: None,
+            )
             try:
                 await sensor.async_setup_entry(hass, entry, added.extend)
             finally:
@@ -112,7 +119,7 @@ def test_battery_only_site_keeps_a_billing_sensor_with_a_value():
 def test_billing_sensors_stay_when_service_is_active_or_unknown():
     for service in ("active", None):
         entities, _ = _setup(_data(service))
-        assert BILLING <= set(entities)
+        assert set(entities) >= BILLING
 
 
 def test_solar_total_only_for_solar_sites():
@@ -151,3 +158,66 @@ def test_solar_power_only_for_solar_sites():
     entities, _ = _setup(_data("active"))
     assert "solar_power" not in entities
     assert {"grid_voltage", "power_from_grid", "battery_power"} <= set(entities)
+
+
+def test_solar_sensors_are_added_when_base_reports_solar_later():
+    listeners = []
+    entities, _ = _setup(_data("active"), listeners=listeners)
+    assert "solar_power" not in entities
+    update, coordinator, added = listeners[0]
+    before = len(added)
+    update()  # still no solar: nothing is added
+    assert len(added) == before
+    coordinator.data = _data("active", has_solar=True)
+    update()
+    new = {e.unique_id.removeprefix("loc-1_") for e in added[before:]}
+    assert new == {"solar_power", "solar_to_home_total", "solar_export_today"}
+    update()  # only once
+    assert len(added) == before + 3
+
+
+def test_solar_site_has_no_listener():
+    listeners = []
+    _setup(_data("active", has_solar=True), listeners=listeners)
+    assert listeners == []
+
+
+def test_money_sensors_use_the_monetary_class():
+    entities, _ = _setup(_data("active", last_bill=18853))
+    bill = entities["bill_amount"]
+    assert bill.device_class == "monetary"
+    assert bill.native_unit_of_measurement == "USD"
+
+
+def test_duplicate_daily_sensors_are_off_by_default():
+    entities, _ = _setup(_data("active"))
+    assert entities["daily_total_grid"].entity_registry_enabled_default is False
+    assert entities["total_home_energy"].entity_registry_enabled_default is False
+    assert entities["grid_to_home"].entity_registry_enabled_default is True
+
+
+def test_battery_status_names_follow_the_api_enum():
+    data = _data("active")
+    for status, name in ((2, "Installed"), (4, "Updating Firmware"), (5, "No Install Planned"), (9, "Unknown (9)")):
+        data["dashboard"]["battery_status"] = status
+        entities, _ = _setup(data)
+        assert entities["battery_status"].native_value == name
+
+
+def test_unique_ids_are_unique_and_keep_their_old_names():
+    entities, _ = _setup(_data("active", has_solar=True))
+    sensor = _sensor_module()
+    keys = [description.key for description in sensor.SENSORS]
+    assert len(keys) == len(set(keys))
+    # Ids from earlier releases. Renaming one would orphan the entity and its history.
+    assert {
+        "backup_hours", "battery_percent", "battery_count", "capacity", "current_power",
+        "current_energy", "daily_peak", "daily_low", "daily_total", "intervals",
+        "battery_status", "wifi_signal", "wifi_ssid", "grid_to_home", "solar_to_home",
+        "battery_to_home", "bill_amount", "bill_due_date", "asset_id", "grid_power_amps",
+        "daily_total_grid", "daily_avg_grid", "total_home_energy", "self_sufficiency",
+        "battery_state", "backup_hours_750w", "grid_to_home_kwh_24h", "solar_to_home_kwh_24h",
+        "battery_to_home_kwh_24h", "grid_support_events_24h", "energy_cost_today",
+        "cycle_net_accrued_cents", "cycle_projected_charges_cents", "cycle_solar_credit_cents",
+        "hardware_sku", "home_usage_total", "solar_to_home_total",
+    } <= set(entities)

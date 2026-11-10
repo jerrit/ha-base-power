@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 import logging
+import time
+from collections.abc import Callable
 from typing import Any
 
 import aiohttp
 
-from .const import CLERK_DOMAIN, CLERK_JS_VERSION
+from .const import CLERK_DOMAIN, CLERK_JS_VERSION, REQUEST_TIMEOUT_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,6 +22,19 @@ def _mask_secret(value: str | None) -> str:
     if len(value) <= 4:
         return "****"
     return f"...{value[-4:]}"
+
+
+_TIMEOUT = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+
+
+def is_auth_rejection(status: int) -> bool:
+    """True when Clerk's answer means the session is gone and the user must sign in.
+
+    A rate limit (429), a timeout (408, 425), or a server error is temporary.
+    Treating those as a rejection would ask for a new sign-in after a blip.
+    """
+    return 400 <= status < 500 and status not in (408, 425, 429)
+
 
 # Refresh JWT 10 seconds before expiry
 JWT_REFRESH_BUFFER = 10
@@ -39,14 +54,25 @@ class BasePowerAuth:
         session: aiohttp.ClientSession,
         client_token: str,
         session_id: str,
-        session_jwt: str | None = None,
+        on_client_token: Callable[[str], None] | None = None,
     ) -> None:
-        """Initialize auth handler."""
+        """Initialize auth handler.
+
+        ``on_client_token`` is called with the new client token when Clerk
+        rotates it, so the caller can save it for the next restart.
+        """
         self._session = session
         self._client_token = client_token
         self._session_id = session_id
-        self._jwt: str | None = session_jwt
+        self._on_client_token = on_client_token
+        self._jwt: str | None = None
         self._jwt_expires_at: float = 0
+        self._lock = asyncio.Lock()
+
+    @property
+    def client_token(self) -> str:
+        """The current client token. Clerk can rotate it on a refresh."""
+        return self._client_token
 
     @property
     def jwt(self) -> str | None:
@@ -56,7 +82,7 @@ class BasePowerAuth:
     @property
     def is_token_valid(self) -> bool:
         """Check if current JWT is still valid."""
-        return self._jwt is not None and time.time() < self._jwt_expires_at
+        return self._jwt is not None and time.monotonic() < self._jwt_expires_at
 
     async def async_refresh_token(self) -> str:
         """Refresh the JWT from Clerk using native mobile API pattern."""
@@ -71,27 +97,36 @@ class BasePowerAuth:
             "x-mobile": "1",
         }
 
-        async with self._session.post(url, headers=headers) as resp:
+        async with self._session.post(url, headers=headers, timeout=_TIMEOUT) as resp:
             if resp.status != 200:
                 await resp.read()
-                _LOGGER.error("Failed to refresh JWT: status=%s", resp.status)
-                raise AuthenticationError(
-                    f"Clerk token refresh failed: {resp.status}"
+                if is_auth_rejection(resp.status):
+                    _LOGGER.error("Clerk rejected the session: status=%s", resp.status)
+                    raise AuthenticationError(
+                        f"Clerk token refresh failed: {resp.status}"
+                    )
+                _LOGGER.debug("Clerk token refresh failed for now: status=%s", resp.status)
+                raise AuthTemporaryError(
+                    f"Clerk token refresh failed for now: {resp.status}"
                 )
-            # Update client token if Clerk rotates it
+            # Clerk can rotate the client token. Keep the new one, and hand
+            # it to the caller so it survives a restart.
             new_token = resp.headers.get("Authorization")
-            if new_token:
+            if new_token and new_token != self._client_token:
                 self._client_token = new_token
+                if self._on_client_token is not None:
+                    self._on_client_token(new_token)
             data = await resp.json()
             self._jwt = data["jwt"]
-            self._jwt_expires_at = time.time() + JWT_LIFETIME - JWT_REFRESH_BUFFER
+            self._jwt_expires_at = time.monotonic() + JWT_LIFETIME - JWT_REFRESH_BUFFER
             return self._jwt
 
-    async def async_ensure_valid_token(self) -> str:
-        """Ensure we have a valid JWT, refreshing if needed."""
-        if not self.is_token_valid:
-            return await self.async_refresh_token()
-        return self._jwt
+    async def async_ensure_valid_token(self, *, force: bool = False) -> str:
+        """Return a valid JWT, refreshing it when it is old or ``force`` is set."""
+        async with self._lock:
+            if force or not self.is_token_valid:
+                return await self.async_refresh_token()
+            return self._jwt
 
     @staticmethod
     async def async_initiate_sign_in(
@@ -111,7 +146,7 @@ class BasePowerAuth:
         }
         data = {"identifier": email}
 
-        async with session.post(url, headers=headers, data=data) as resp:
+        async with session.post(url, headers=headers, data=data, timeout=_TIMEOUT) as resp:
             if resp.status != 200:
                 await resp.read()
                 _LOGGER.error("Sign-in initiation failed: status=%s", resp.status)
@@ -169,7 +204,7 @@ class BasePowerAuth:
         }
         data = {"strategy": "email_code", "email_address_id": email_id}
 
-        async with session.post(url, headers=headers, data=data) as resp:
+        async with session.post(url, headers=headers, data=data, timeout=_TIMEOUT) as resp:
             if resp.status != 200:
                 await resp.read()
                 _LOGGER.error("prepare_first_factor failed: status=%s", resp.status)
@@ -203,7 +238,7 @@ class BasePowerAuth:
         }
         data = {"strategy": "email_code", "code": code}
 
-        async with session.post(url, headers=headers, data=data) as resp:
+        async with session.post(url, headers=headers, data=data, timeout=_TIMEOUT) as resp:
             if resp.status != 200:
                 await resp.read()
                 raise AuthenticationError(f"OTP verification failed: {resp.status}")
@@ -239,4 +274,8 @@ class BasePowerAuth:
 
 
 class AuthenticationError(Exception):
-    """Raised when authentication fails."""
+    """Raised when Clerk rejects the session. The user has to sign in again."""
+
+
+class AuthTemporaryError(Exception):
+    """Raised when Clerk cannot answer right now. The session is still good."""

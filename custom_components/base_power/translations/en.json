@@ -48,7 +48,7 @@
           "battery_capacity": "Battery Capacity"
         },
         "data_description": {
-          "wifi_ssid": "Choose the WiFi network your battery uses. The integration tracks that network only.",
+          "wifi_ssid": "Only used if Base doesn't report which WiFi network your battery is on. Leave it empty to detect the network.",
           "battery_capacity": "Used only if Base doesn't report your battery model. Wall is 20 kWh, original systems are 25 or 50 kWh, and Base Core is 40 or 80 kWh."
         }
       }

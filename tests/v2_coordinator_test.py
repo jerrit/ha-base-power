@@ -8,9 +8,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import importlib
-import sys
+import time
 import types
 from pathlib import Path
 
@@ -18,18 +17,13 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
-from homeassistant.core import HomeAssistant  # noqa: E402
-from homeassistant.helpers import frame  # noqa: E402
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import frame
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _modules():
-    components = sys.modules.get("custom_components")
-    if components is None or not hasattr(components, "__path__"):
-        components = types.ModuleType("custom_components")
-        components.__path__ = [str(_ROOT / "custom_components")]
-        sys.modules["custom_components"] = components
     coordinator = importlib.import_module("custom_components.base_power.coordinator")
     api = importlib.import_module("custom_components.base_power.api")
     v2 = importlib.import_module("custom_components.base_power.api_v2")
@@ -325,7 +319,7 @@ def test_no_voltage_from_either_api_stays_unknown():
         fake.voltage = None
         fake.v2_voltage = None
 
-    calls, data = _run_polls(none, 1)[0]
+    _calls, data = _run_polls(none, 1)[0]
     assert data["grid"]["voltage_volts"] is None
     assert data["grid"]["grid_is_up"] is None
     assert data["sources"]["voltage"] is None

@@ -7,11 +7,14 @@ base-power.zip
 extracted/
 xapk_extracted/
 tools/
-test_*.py
+/test_*.py
 decode_proto.py
 probe_api.py
 
 # Python
+.coverage
+.pytest_cache/
+.ruff_cache/
 __pycache__/
 *.py[cod]
 *.egg-info/

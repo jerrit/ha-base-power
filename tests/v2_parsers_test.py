@@ -5,46 +5,15 @@ Messages are built here with the field numbers from Base's gRPC reflection.
 
 from __future__ import annotations
 
-import importlib.util
 import struct
-import sys
-import types
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _PKG = "custom_components.base_power"
 
 
-def _load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(
-        name, _ROOT / "custom_components" / "base_power" / filename
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_v2():
-    if _PKG + ".api_v2" in sys.modules:
-        return sys.modules[_PKG + ".api_v2"]
-    if _PKG + ".api" not in sys.modules:
-        components = sys.modules.get("custom_components")
-        if components is None:
-            components = types.ModuleType("custom_components")
-            components.__path__ = [str(_ROOT / "custom_components")]
-            sys.modules["custom_components"] = components
-        if _PKG not in sys.modules:
-            package = types.ModuleType(_PKG)
-            package.__path__ = [str(_ROOT / "custom_components" / "base_power")]
-            sys.modules[_PKG] = package
-        _load(_PKG + ".const", "const.py")
-        _load(_PKG + ".api", "api.py")
-    return _load(_PKG + ".api_v2", "api_v2.py")
-
-
-v2 = _load_v2()
+from custom_components.base_power import api as _api_module  # noqa: E402
+from custom_components.base_power import api_v2 as v2  # noqa: E402
 
 
 def _varint(value: int) -> bytes:
@@ -141,7 +110,7 @@ def test_empty_snapshot_is_unavailable():
 def test_off_grid_states():
     assert "on_grid" not in v2.OFF_GRID_STATES
     assert "telemetry_unavailable" not in v2.OFF_GRID_STATES
-    assert v2.OFF_GRID_STATES == {"outage", "no_home_power", "overcurrent", "overcurrent_standby"}
+    assert {"outage", "no_home_power", "overcurrent", "overcurrent_standby"} == v2.OFF_GRID_STATES
 
 
 # --- daily overview -----------------------------------------------------------
@@ -370,7 +339,7 @@ def _discover(v2_result, legacy_id):
     """Run setup discovery with fake ListLocations and legacy responses."""
     import asyncio
 
-    api = sys.modules[_PKG + ".api"]
+    api = _api_module
     client_cls = api.BasePowerApiClient
     calls = []
 
@@ -472,9 +441,57 @@ def test_overview_hours_keep_the_late_hour_from_yesterday():
 
 
 def test_legacy_billing_reads_last_bill_next_to_spend_so_far():
-    api = sys.modules[_PKG + ".api"]
+    api = _api_module
     parsed = api.BasePowerApiClient._parse_billing_metadata(
         bytes.fromhex("0a0a080210a5930118b0880212020802")
     )
     assert parsed["amount_cents"] == 18853
     assert parsed["last_bill_cents"] == 33840
+
+
+# --- added with the November 2026 schema review --------------------------------
+
+
+def test_location_reads_the_site_time_zone_and_next_service():
+    address = msg(1, b"1 Main St") + msg(3, b"Austin") + msg(7, b"America/Chicago")
+    summary = msg(1, msg(1, b"site-1") + msg(2, address))
+    onsite = ts(2, 1_800_500_000) + msg(4, _battery(1, 1))
+    location = summary + msg(2, msg(2, b"")) + msg(3, msg(5, onsite))
+    parsed = v2.parse_location(msg(1, location))
+    assert parsed["time_zone"] == "America/Chicago"
+    assert parsed["upcoming_service_at"] == 1_800_500_000
+    assert parsed["batteries"] == [{"generation": "GEN1", "variant": "SINGLE"}]
+    # The street and city are not kept.
+    assert "Main" not in str(parsed)
+
+
+def test_planned_battery_field_2_is_not_a_service_date():
+    # Only the onsite state has upcoming_service_at in field 2.
+    parsed = v2.parse_location(_site(5, 3, ts(2, 1_800_500_000) + msg(1, _battery(1, 1))))
+    assert parsed["upcoming_service_at"] is None
+
+
+def test_overview_sums_todays_solar_export():
+    start = 1_800_000_000
+    yesterday = msg(4, ts(1, start - 3600) + dbl(2, 1.0) + dbl(4, 9.0))
+    today = msg(4, ts(1, start) + dbl(2, 0.5) + dbl(3, 2.0) + dbl(4, 1.25))
+    later = msg(4, ts(1, start + 3600) + dbl(2, 0.5) + dbl(4, 0.5))
+    parsed = v2.parse_daily_overview(yesterday + today + later, start, start + 86400)
+    assert parsed["solar_export_today_kwh"] == 1.75
+    assert v2.parse_daily_overview(yesterday, start, start + 86400)["solar_export_today_kwh"] is None
+
+
+def test_daily_energy_request_and_reply():
+    request = v2.encode_daily_energy_request("loc-1", 1_800_000_000, 1_800_086_400)
+    assert request == msg(1, b"loc-1") + ts(2, 1_800_000_000) + ts(3, 1_800_086_400)
+    reply = (
+        msg(1, ts(1, 1_800_086_400) + dbl(2, 22.9352))
+        + msg(1, ts(1, 1_800_000_000) + dbl(2, 34.334) + dbl(3, 4.5))
+        + msg(1, ts(1, 1_800_172_800) + dbl(2, float("nan")))
+        + msg(2, b"USD")
+    )
+    assert v2.parse_daily_energy(reply) == [
+        {"start": 1_800_000_000, "home_kwh": 34.334, "solar_kwh": 4.5},
+        {"start": 1_800_086_400, "home_kwh": 22.9352, "solar_kwh": 0.0},
+    ]
+    assert v2.parse_daily_energy(b"") == []

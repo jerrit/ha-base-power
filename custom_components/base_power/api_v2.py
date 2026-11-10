@@ -80,6 +80,24 @@ def encode_billing_cycle_request(address_id: str, account_type: int = ACCOUNT_TY
     return b"\x0a" + _encode_varint(len(reference)) + reference
 
 
+def _timestamp_field(field_number: int, seconds: int) -> bytes:
+    """A google.protobuf.Timestamp with only seconds, as a message field."""
+    stamp = b"\x08" + _encode_varint(int(seconds))
+    return _encode_varint(field_number << 3 | 2) + _encode_varint(len(stamp)) + stamp
+
+
+def encode_daily_energy_request(address_id: str, start: int, end: int) -> bytes:
+    """GetDailyEnergyRequest: 1 address_id, 2 service_period_start, 3 service_period_end.
+
+    The server rejects a request without the two dates.
+    """
+    return (
+        encode_address_request(address_id)
+        + _timestamp_field(2, start)
+        + _timestamp_field(3, end)
+    )
+
+
 def _int64(value: int) -> int:
     """A negative int64 arrives as a 64-bit two's-complement varint."""
     return value - (1 << 64) if value >= 1 << 63 else value
@@ -132,17 +150,20 @@ def empty_location() -> dict[str, Any]:
         "energy_service": None,
         "has_solar": None,
         "batteries": [],
+        "time_zone": None,
+        "upcoming_service_at": None,
     }
 
 
 def parse_location(data: bytes) -> dict[str, Any]:
-    """Parse GetLocationResponse. Reads only energy service, solar, and battery models.
+    """Parse GetLocationResponse.
 
-    location (1): 2 energy (oneof, see ENERGY_SERVICE_STATES), 3 battery
-    (oneof; planned and activating list batteries in field 1, onsite in
-    field 4), 4 capabilities {1 has_solar, 2 billing}. Each battery is
-    {1 hardware_device_id, 2 generation, 3 variant}. The address and
-    referral fields are skipped.
+    location (1): 1 summary {2 address {7 timezone}}, 2 energy (oneof, see
+    ENERGY_SERVICE_STATES), 3 battery (oneof; planned and activating list
+    batteries in field 1, onsite in field 4 with upcoming_service_at in
+    field 2), 4 capabilities {1 has_solar, 2 billing}. Each battery is
+    {1 hardware_device_id, 2 generation, 3 variant}. Only the time zone is
+    read from the address. The street, city, and referral fields are skipped.
     """
     result = empty_location()
     location = next((v for f, k, v in _iter_fields(data) if f == 1 and k == "bytes"), None)
@@ -152,7 +173,14 @@ def parse_location(data: bytes) -> dict[str, Any]:
     for field_num, kind, value in _iter_fields(location):
         if kind != "bytes":
             continue
-        if field_num == 2:
+        if field_num == 1:
+            for sub_num, sub_kind, summary in _iter_fields(value):
+                if sub_num != 2 or sub_kind != "bytes":
+                    continue
+                for addr_num, addr_kind, text in _iter_fields(summary):
+                    if addr_num == 7 and addr_kind == "bytes":
+                        result["time_zone"] = text.decode("utf-8", "replace").strip() or None
+        elif field_num == 2:
             state = next((f for f, k, _ in _iter_fields(value) if k == "bytes"), None)
             result["energy_service"] = ENERGY_SERVICE_STATES.get(state) if state else None
         elif field_num == 3:
@@ -161,6 +189,9 @@ def parse_location(data: bytes) -> dict[str, Any]:
                 if list_field is None or state_kind != "bytes":
                     continue
                 for sub_num, sub_kind, battery in _iter_fields(state_value):
+                    # Only the onsite state (5) has a service date, in field 2.
+                    if state_num == 5 and sub_num == 2 and sub_kind == "bytes":
+                        result["upcoming_service_at"] = _timestamp_seconds(battery)
                     if sub_num != list_field or sub_kind != "bytes":
                         continue
                     numbers = {f: v for f, k, v in _iter_fields(battery) if k == "varint"}
@@ -210,7 +241,7 @@ def parse_battery_snapshot(data: bytes) -> dict[str, Any]:
         if "state_of_energy_percent" in layout.values():
             result["state_of_energy_percent"] = 0
         if "power_flow" in layout.values():
-            result["power_flow"] = {key: 0.0 for key in _POWER_FLOW_FIELDS.values()}
+            result["power_flow"] = dict.fromkeys(_POWER_FLOW_FIELDS.values(), 0.0)
         for sub_num, sub_kind, sub_value in _iter_fields(value):
             key = layout.get(sub_num)
             if key == "observed_at" and sub_kind == "bytes":
@@ -238,6 +269,7 @@ def empty_overview() -> dict[str, Any]:
         "cost_currency": None,
         "home_power": [],
         "energy_today": None,
+        "solar_export_today_kwh": None,
         "hours": [],
     }
 
@@ -268,6 +300,9 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
 
     hours lists every hourly sample in the reply, today or not. Base posts
     the last hour of a day after midnight, so only this list still has it.
+
+    solar_export_today_kwh sums the hourly solar_export_kwh (field 4) in
+    [start, end).
     """
     result = empty_overview()
     if not data:
@@ -278,6 +313,7 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
     cost_24h_seen = False
     home_kwh = 0.0
     solar_kwh = 0.0
+    export_kwh = 0.0
     hours_today = 0
     for field_num, kind, value in _iter_fields(data):
         if kind != "bytes":
@@ -303,6 +339,9 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
             if start <= stamp < end:
                 home_kwh += home
                 solar_kwh += solar
+                export = numbers.get(4, 0.0)
+                if math.isfinite(export):
+                    export_kwh += export
                 hours_today += 1
         elif field_num == 3:
             interval: dict[str, int | None] = {"start": None, "end": None}
@@ -346,6 +385,7 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
             "solar_to_home_kwh": round(solar_kwh, 3),
             "battery_to_home_kwh": None,
         }
+        result["solar_export_today_kwh"] = round(export_kwh, 3)
     result["home_power"].sort(key=lambda point: point["timestamp"])
     _LOGGER.debug(
         "DailyOverview parsed: mix=%s grid_support=%d cost_today=%s",
@@ -354,6 +394,27 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
         result["cost_today_cents"],
     )
     return result
+
+
+def parse_daily_energy(data: bytes) -> list[dict[str, Any]]:
+    """Parse GetDailyEnergyResponse into one entry per day, oldest first.
+
+    samples (1, repeated DailyEnergySample): 1 interval_start, 2
+    energy_to_home_kwh, 3 solar_to_home_kwh. interval_start is the site's
+    local midnight. A non-finite sample is dropped.
+    """
+    days: list[dict[str, Any]] = []
+    for field_num, kind, value in _iter_fields(data):
+        if field_num != 1 or kind != "bytes":
+            continue
+        stamp, numbers = _sample(value)
+        home = numbers.get(2, 0.0)
+        solar = numbers.get(3, 0.0)
+        if stamp is None or not (math.isfinite(home) and math.isfinite(solar)):
+            continue
+        days.append({"start": stamp, "home_kwh": home, "solar_kwh": solar})
+    days.sort(key=lambda day: day["start"])
+    return days
 
 
 def empty_billing_cycle() -> dict[str, Any]:
