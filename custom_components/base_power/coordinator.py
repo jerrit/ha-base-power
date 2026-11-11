@@ -29,6 +29,7 @@ from .const import (
     CONF_BATTERY_CAPACITY,
     CONF_BATTERY_COUNT,
     CONF_WIFI_SSID,
+    CONTEXT_HOLD_SECONDS,
     DEFAULT_BATTERY_COUNT,
     HARDWARE_SKU_CAPACITY,
     SCAN_INTERVAL_SECONDS,
@@ -58,6 +59,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     _usage_failures = 0
     # True while a 60-second poll is still waiting on Base
     _fast_poll_running = False
+    # Last good service context, and when it arrived
+    _last_context: dict[str, Any] | None = None
+    _last_context_at = 0.0
     # Last known direction of the battery's charge, and when it last rose
     _charging: bool | None = None
     _charge_rose_at: float | None = None
@@ -230,6 +234,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             context = await self.api.get_service_context(numeric_id)
         except Exception as err:
             _LOGGER.debug("ServiceContext fetch failed: %s", err)
+        context = self._hold_context(context)
         source: str | None = None
         try:
             voltage = await self.api.get_grid_status(numeric_id)
@@ -254,6 +259,29 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         grid = self.api.combine_grid_telemetry(context, voltage)
         grid["voltage_source"] = source
         return grid
+
+    def _hold_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Return the last good context when this one missed and is recent.
+
+        Base sometimes fails one call. Without this, battery level, power,
+        and backup time go unknown for a minute. A longer gap still shows
+        unknown, so an old reading is never passed off as current.
+        """
+        now = self._monotonic()
+        if context.get("available"):
+            self._last_context = context
+            self._last_context_at = now
+            return context
+        if (
+            self._last_context is not None
+            and now - self._last_context_at <= CONTEXT_HOLD_SECONDS
+        ):
+            _LOGGER.debug(
+                "ServiceContext missed; using the one from %.0f s ago",
+                now - self._last_context_at,
+            )
+            return self._last_context
+        return context
 
     def _snapshot_due(self) -> bool:
         """Every 10th poll, or every poll while something points to an outage.

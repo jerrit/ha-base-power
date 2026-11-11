@@ -281,12 +281,26 @@ async def test_voltage_falls_back_to_the_newer_call(hass, setup_integration, fak
 
 async def test_a_missed_grid_poll_is_unknown_not_the_last_reading(hass, setup_integration, fake_api):
     entry = await setup_integration()
+    coordinator = entry.runtime_data
+    clock = {"t": coordinator._monotonic()}
+    coordinator._monotonic = lambda: clock["t"]
+    await coordinator.async_poll_grid_status()
     fake_api.fail = {"get_grid_status", "get_recent_grid_voltage", "get_service_context"}
-    await entry.runtime_data.async_poll_grid_status()
+    clock["t"] += 60
+    await coordinator.async_poll_grid_status()
     await hass.async_block_till_done()
+    # Grid Power never guesses "up" without live voltage.
     assert _state(hass, "binary_sensor", "grid_power") == "unknown"
     assert _state(hass, "sensor", "grid_voltage") == "unknown"
+    # One missed minute keeps the last battery and power readings.
+    assert _state(hass, "sensor", "power_from_grid") == "800"
+    assert _state(hass, "sensor", "battery_level") not in ("unknown", "unavailable")
+    # A longer gap shows unknown, not an old reading.
+    clock["t"] += 180
+    await coordinator.async_poll_grid_status()
+    await hass.async_block_till_done()
     assert _state(hass, "sensor", "power_from_grid") == "unknown"
+    assert _state(hass, "sensor", "battery_level") == "unknown"
 
 
 async def test_an_outage_turns_grid_power_off(hass, setup_integration, fake_api):

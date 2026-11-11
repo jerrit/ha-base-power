@@ -177,11 +177,14 @@ class FakeApi:
         self.v2_voltage: float | None = 244.8
         self.snapshot_state = "on_grid"
         self.fail_snapshot = False
+        self.fail_context = False
 
     combine_grid_telemetry = None  # set in __init__ below
 
     async def get_service_context(self, numeric_id):
         self.calls.append("ServiceContext")
+        if self.fail_context:
+            raise ConnectionError("down")
         context = self._api._empty_service_context()
         context.update(self.context)
         return context
@@ -260,6 +263,52 @@ def _run_polls(setup, polls: int):
             await hass.async_stop(force=True)
 
     return asyncio.run(run())
+
+
+def _context_polls(hass_steps):
+    """Run polls with a fake clock. Each step is (seconds since start, context fails)."""
+
+    async def run():
+        hass = HomeAssistant(str(_ROOT))
+        frame.async_setup(hass)
+        try:
+            coordinator, fake = await _coordinator(hass)
+            fake.context = {
+                "available": True, "is_active_outage": False, "home_has_power": True,
+                "state_of_energy_raw": 99, "power_to_home_kw": 1.4,
+            }
+            clock = {"t": 1000.0}
+            coordinator._monotonic = lambda: clock["t"]
+            out = []
+            for at, fails in hass_steps:
+                clock["t"] = 1000.0 + at
+                fake.fail_context = fails
+                await coordinator.async_poll_grid_status()
+                out.append(coordinator.data["grid"])
+            return out
+        finally:
+            await hass.async_stop(force=True)
+
+    return asyncio.run(run())
+
+
+def test_one_missed_service_context_keeps_the_last_reading():
+    grids = _context_polls([(0, False), (60, True), (120, False)])
+    assert [g["power_to_home_kw"] for g in grids] == [1.4, 1.4, 1.4]
+    assert grids[1]["battery_soc_percent"] == grids[0]["battery_soc_percent"]
+    assert grids[1]["battery_soc_percent"] is not None
+
+
+def test_service_context_down_for_minutes_goes_unknown():
+    grids = _context_polls([(0, False), (60, True), (180, True), (240, True)])
+    assert grids[2]["power_to_home_kw"] == 1.4  # 3 minutes: still held
+    assert grids[3]["power_to_home_kw"] is None
+    assert grids[3]["battery_soc_percent"] is None
+
+
+def test_no_held_context_before_the_first_good_one():
+    grids = _context_polls([(0, True)])
+    assert grids[0]["power_to_home_kw"] is None
 
 
 def _snapshot_polls(results):

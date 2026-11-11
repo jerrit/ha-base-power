@@ -140,6 +140,9 @@ DAY_REPAIR_MIN_KWH = 0.05
 USAGE_STALE_AFTER_FAILURES = 4
 # Battery Charging stays on this long after the last rise in charge.
 CHARGING_HOLD_SECONDS = 3 * 3600
+# A missed ServiceContext reuses the last good one for this long, so one
+# failed 60-second call does not blank the live sensors.
+CONTEXT_HOLD_SECONDS = 3 * 60
 
 # Platforms
 PLATFORMS = ["sensor", "binary_sensor"]

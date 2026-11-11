@@ -11,6 +11,7 @@ This is a beta. To get it, open Base Power in the Marketplace and turn on pre-re
 - **Slow replies no longer pile up.** Requests time out after 20 seconds, and a 60-second poll is skipped while the one before it is still waiting.
 - **Old values no longer look current.** Usage and energy sensors turn unavailable when Base has sent no new usage data for about an hour.
 - A call that fails during the 6-hour refresh is retried after 15 minutes, not 6 hours later.
+- **Brief blanks in the live sensors.** One failed call to Base made Battery Level, Backup Time, the power sensors, Battery Connected, and Battery Charging read unknown for a minute. They now keep the last reading for up to 3 minutes. Grid Power still needs a live voltage reading, so it never shows the grid as up based on an old reading.
 
 ### New
 - **Home Usage (Total)** and, on homes with solar, **Solar to Home (Total)**. These running totals never reset at midnight. Each hour is counted once, whenever Base posts it, and the count survives restarts. They start with the last 24 hours. Use them in the Energy Dashboard in place of the daily sensors.
