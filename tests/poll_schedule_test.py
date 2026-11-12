@@ -3,52 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-import sys
-import types
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _PKG = "custom_components.base_power"
 
 
-def _load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(
-        name, _ROOT / "custom_components" / "base_power" / filename
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+from custom_components.base_power import poll as _poll  # noqa: E402
 
-
-def _ensure_package() -> None:
-    if _PKG in sys.modules and hasattr(sys.modules[_PKG], "__path__"):
-        return
-    components = sys.modules.get("custom_components")
-    if components is None:
-        components = types.ModuleType("custom_components")
-        components.__path__ = [str(_ROOT / "custom_components")]
-        sys.modules["custom_components"] = components
-    package = types.ModuleType(_PKG)
-    package.__path__ = [str(_ROOT / "custom_components" / "base_power")]
-    package.__package__ = _PKG
-    sys.modules[_PKG] = package
-
-
-def _load_poll():
-    _ensure_package()
-    if _PKG + ".const" not in sys.modules:
-        _load(_PKG + ".const", "const.py")
-    if _PKG + ".auth" not in sys.modules:
-        _load(_PKG + ".auth", "auth.py")
-    if _PKG + ".poll" not in sys.modules:
-        _load(_PKG + ".poll", "poll.py")
-    return sys.modules[_PKG + ".poll"]
-
-
-_poll = _load_poll()
 PollState = _poll.PollState
 refresh_slow = _poll.refresh_slow
 refresh_usage = _poll.refresh_usage
@@ -87,10 +49,10 @@ class RecordingApi:
         return await self._hit("MobileGetWifiMetrics", {"scan": {"Home": 40}})
 
     async def get_billing_metadata(self, address):
-        return await self._hit("MobileGetBillingMetadata", {"amount_cents": 10, "due_date": None})
+        return await self._hit("MobileGetBillingMetadata", {"amount_cents": 10, "last_bill_cents": None})
 
     async def get_usage_cycles(self, address):
-        return await self._hit("MobileGetUsageCycles", {"asset_id": "asset-1", "cycle_start": 10})
+        return await self._hit("MobileGetUsageCycles", {"account_id": "asset-1", "cycle_start": 10})
 
     async def get_recent_usage(self, address):
         return await self._hit(
@@ -135,6 +97,17 @@ class RecordingApi:
                                                 "next_bill_date": None,
                                                 "next_autopay_date": None})
 
+    async def get_location(self, address):
+        return await self._hit("GetLocation", {"available": True, "energy_service": "active",
+                                               "has_solar": False,
+                                               "batteries": [{"generation": "GEN1",
+                                                              "variant": "SINGLE"}]})
+
+    async def get_daily_energy(self, address, start, end):
+        return await self._hit(
+            "GetDailyEnergy", [{"start": 86400, "home_kwh": 20.0, "solar_kwh": 0.0}]
+        )
+
 
 def test_steady_state_is_under_135_calls_per_hour():
     per_hour = _poll.steady_state_calls_per_hour()
@@ -145,7 +118,7 @@ def test_steady_state_is_under_135_calls_per_hour():
     assert fast == 120
     assert snapshot == 6
     assert usage == 4
-    assert abs(slow - 7 / 6) < 1e-9
+    assert abs(slow - 9 / 6) < 1e-9
     assert per_hour == fast + snapshot + usage + slow
     assert per_hour < 135
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.
@@ -214,7 +187,7 @@ def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
         "solar_to_home_kwh": 0.0,
         "battery_to_home_kwh": None,
     }
-    state.billing = {"amount_cents": 100, "due_date": "2026-02-01"}
+    state.billing = {"amount_cents": 100, "last_bill_cents": None}
     state.wifi = {"scan": {"Home": 10}, "ssid": "Home", "signal": 10, "connected": True}
 
     api = RecordingApi(
@@ -233,6 +206,7 @@ def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
     assert state.energy["grid_to_home_kwh"] == 3.0
     assert state.billing["amount_cents"] == 100
     assert state.wifi["ssid"] == "Home"
+    assert state.location["available"] is False
     assert api.calls[-2:] == ["MobileGetServiceContext", "MobileGetGridStatus"]
 
 

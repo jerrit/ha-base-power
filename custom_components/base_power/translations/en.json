@@ -15,6 +15,13 @@
           "code": "Verification Code"
         }
       },
+      "pick_location": {
+        "title": "Choose a Site",
+        "description": "Your Base account has more than one site. Choose the one to add. To add another site later, set up the integration again.",
+        "data": {
+          "service_location_id": "Site"
+        }
+      },
       "location": {
         "title": "Service Location",
         "description": "Enter your Base Power service location ID (found in the app settings).",
@@ -41,7 +48,7 @@
           "battery_capacity": "Battery Capacity"
         },
         "data_description": {
-          "wifi_ssid": "Choose the WiFi network your battery uses. The integration tracks that network only.",
+          "wifi_ssid": "Only used if Base doesn't report which WiFi network your battery is on. Leave it empty to detect the network.",
           "battery_capacity": "Used only if Base doesn't report your battery model. Wall is 20 kWh, original systems are 25 or 50 kWh, and Base Core is 40 or 80 kWh."
         }
       }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import struct
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
@@ -13,14 +14,21 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import aiohttp
 
 from .const import (
+    API_CONTENT_TYPE,
     API_HOST,
     API_SERVICE,
-    API_CONTENT_TYPE,
     GRID_COLLAPSED_VOLTS,
     GRID_PRESENT_VOLTS,
+    REQUEST_TIMEOUT_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_TIMEOUT = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+# gRPC status for a missing or expired token
+GRPC_UNAUTHENTICATED = "16"
+# MobileGetServiceContext gatewayWifi.state. Proto3 leaves out 0.
+GATEWAY_WIFI_STATES = {0: "connected", 1: "connecting", 2: "not_connected"}
 
 
 def _build_grpc_frame(payload: bytes) -> bytes:
@@ -122,7 +130,7 @@ def grid_current_amps(power_from_grid_kw: float | None, voltage_volts: float | N
 def _encode_service_location_request(service_location_id: str) -> bytes:
     """Encode a protobuf request with the external address id as field 1 (string)."""
     encoded = service_location_id.encode("utf-8")
-    return b"\x0a" + bytes([len(encoded)]) + encoded
+    return b"\x0a" + _encode_varint(len(encoded)) + encoded
 
 
 def _encode_varint(value: int) -> bytes:
@@ -197,7 +205,7 @@ def _sum_local_day(
         return None
     total = 0.0
     seen = False
-    for sample, stamp in zip(samples, stamps):
+    for sample, stamp in zip(samples, stamps, strict=True):
         if stamp is None or not math.isfinite(sample):
             return None
         if start <= stamp < end:
@@ -340,91 +348,44 @@ def _packed_floats(blob: bytes) -> list[float]:
 
 
 def _parse_first_location_id(data: bytes) -> str | None:
-    """Parse MobileGetAvailableLocations response to extract the first location ID.
+    """First address id in MobileGetAvailableLocations.
 
-    Response: field 1 = sub-message { field 1 = location_id (string) }
+    locations (1, repeated) → addressId (1, string).
     """
-    offset = 0
-    while offset < len(data):
-        tag_val, new_offset = _decode_varint(data, offset)
-        if new_offset == offset:
-            break
-        offset = new_offset
-        field_num = tag_val >> 3
-        wire_type = tag_val & 0x07
-        if wire_type == 2:
-            length, offset = _decode_varint(data, offset)
-            sub = data[offset : offset + length]
-            offset += length
-            if field_num == 1:
-                # First location sub-message — extract field 1 (location ID string)
-                sub_offset = 0
-                while sub_offset < len(sub):
-                    sub_tag, new_sub = _decode_varint(sub, sub_offset)
-                    if new_sub == sub_offset:
-                        break
-                    sub_offset = new_sub
-                    sub_field = sub_tag >> 3
-                    sub_wire = sub_tag & 0x07
-                    if sub_wire == 2:
-                        sub_len, sub_offset = _decode_varint(sub, sub_offset)
-                        value = sub[sub_offset : sub_offset + sub_len]
-                        sub_offset += sub_len
-                        if sub_field == 1:
-                            try:
-                                return value.decode("utf-8")
-                            except Exception:
-                                return None
-                    else:
-                        sub_offset = _skip_field(sub, sub_offset, sub_wire)
-                return None
-        else:
-            offset = _skip_field(data, offset, wire_type)
+    for field_num, kind, location in _iter_fields(data):
+        if field_num != 1 or kind != "bytes":
+            continue
+        for sub_num, sub_kind, value in _iter_fields(location):
+            if sub_num == 1 and sub_kind == "bytes":
+                return _text(value)
+        return None
     return None
 
 
-def _parse_billing_fields(data: bytes, result: dict[str, Any], *, nested: bool = False) -> None:
-    """Read amount_cents and due_date from a billing message."""
-    offset = 0
-    while offset < len(data):
-        tag_val, new_offset = _decode_varint(data, offset)
-        if new_offset == offset:
-            break
-        offset = new_offset
-        field_num = tag_val >> 3
-        wire_type = tag_val & 0x07
-
-        if wire_type == 0:
-            val, offset = _decode_varint(data, offset)
-            if field_num == 2 and result.get("amount_cents") is None:
-                result["amount_cents"] = val
-        elif wire_type == 2:
-            length, offset = _decode_varint(data, offset)
-            if offset + length > len(data):
-                break
-            payload = data[offset : offset + length]
-            offset += length
-            if field_num == 3 and payload and result.get("due_date") is None:
-                try:
-                    text = payload.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = ""
-                if text and text.isprintable():
-                    result["due_date"] = text
-                    continue
-            # Live captures nest amount_cents inside field 1.
-            if field_num == 1 and payload and not nested and result.get("amount_cents") is None:
-                _parse_billing_fields(payload, result, nested=True)
-        else:
-            offset = _skip_field(data, offset, wire_type)
+def _text(value: bytes) -> str | None:
+    """Decode a protobuf string. None when it is empty or not UTF-8."""
+    try:
+        return value.decode("utf-8") or None
+    except UnicodeDecodeError:
+        return None
 
 
 class BasePowerApiClient:
     """Client for the Base Power gRPC-Web API."""
 
-    def __init__(self, session: aiohttp.ClientSession) -> None:
-        """Initialize the API client."""
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        token_provider: Callable[..., Awaitable[str]] | None = None,
+    ) -> None:
+        """Initialize the API client.
+
+        ``token_provider(force=False)`` returns a valid JWT. With one set,
+        every call asks for the token, so a long refresh cannot outlive the
+        60-second JWT. Without one, ``set_jwt`` supplies the token.
+        """
         self._session = session
+        self._token_provider = token_provider
         self._jwt: str | None = None
 
     def set_jwt(self, jwt: str) -> None:
@@ -432,37 +393,46 @@ class BasePowerApiClient:
         self._jwt = jwt
 
     @staticmethod
+    async def async_discover_locations(
+        session: aiohttp.ClientSession, jwt: str
+    ) -> list[dict[str, str]]:
+        """List the account's sites for setup.
+
+        Tries the newer LocationsService/ListLocations first, then the older
+        MobileGetAvailableLocations. Returns [] when neither finds a site.
+        """
+        from . import api_v2  # api_v2 imports this module, so import late
+
+        client = BasePowerApiClient(session)
+        client.set_jwt(jwt)
+        try:
+            data, ok = await client._invoke(
+                "ListLocations",
+                optional=True,
+                service=f"{api_v2.V2_PACKAGE}.LocationsService",
+            )
+            locations = api_v2.parse_locations(data) if ok else []
+        except Exception:
+            _LOGGER.debug("ListLocations failed", exc_info=True)
+            locations = []
+        if locations:
+            return locations
+        location_id = await BasePowerApiClient.async_discover_location_id(session, jwt)
+        return [{"address_id": location_id, "label": location_id}] if location_id else []
+
+    @staticmethod
     async def async_discover_location_id(
         session: aiohttp.ClientSession, jwt: str
     ) -> str | None:
         """Call MobileGetAvailableLocations to auto-discover service location ID."""
-        url = f"{API_HOST}/{API_SERVICE}/MobileGetAvailableLocations"
-        headers = {
-            "Content-Type": API_CONTENT_TYPE,
-            "authorization": jwt,
-            "x-grpc-web": "1",
-        }
+        client = BasePowerApiClient(session)
+        client.set_jwt(jwt)
         try:
-            async with session.post(
-                url, headers=headers, data=_build_grpc_frame(b"")
-            ) as resp:
-                raw = await resp.read()
-                data, grpc_status, grpc_message = _merge_grpc_status(
-                    resp.headers.get("grpc-status", ""),
-                    resp.headers.get("grpc-message", ""),
-                    raw,
-                )
-                if grpc_status and grpc_status != "0":
-                    _LOGGER.debug(
-                        "MobileGetAvailableLocations grpc-status=%s message=%s",
-                        grpc_status,
-                        grpc_message,
-                    )
-                    return None
-                return _parse_first_location_id(data)
+            data, ok = await client._invoke("MobileGetAvailableLocations", optional=True)
         except Exception:
             _LOGGER.debug("Location discovery request failed", exc_info=True)
             return None
+        return _parse_first_location_id(data) if ok else None
 
     async def _call(
         self,
@@ -492,32 +462,49 @@ class BasePowerApiClient:
         fill the error log.
         """
         url = f"{API_HOST}/{service}/{method}"
-        headers = {
-            "Content-Type": API_CONTENT_TYPE,
-            "authorization": self._jwt,
-            "x-grpc-web": "1",
-        }
         body = _build_grpc_frame(payload)
+        log = _LOGGER.debug if optional else _LOGGER.error
 
-        async with self._session.post(url, headers=headers, data=body) as resp:
-            response_data = await resp.read()
-            data, grpc_status, grpc_message = _merge_grpc_status(
-                resp.headers.get("grpc-status", ""),
-                resp.headers.get("grpc-message", ""),
-                response_data,
-            )
-            if grpc_status and grpc_status != "0":
-                log = _LOGGER.debug if optional else _LOGGER.error
-                log(
-                    "gRPC error calling %s: status=%s message=%s",
-                    method,
-                    grpc_status,
-                    grpc_message or "unknown",
+        # Two tries at most. The second only runs when Base says the token
+        # is missing or expired, and it asks for a new one first.
+        for attempt in (1, 2):
+            if self._token_provider is not None:
+                self._jwt = await self._token_provider(force=attempt == 2)
+            headers = {
+                "Content-Type": API_CONTENT_TYPE,
+                "authorization": self._jwt,
+                "x-grpc-web": "1",
+            }
+            async with self._session.post(
+                url, headers=headers, data=body, timeout=_TIMEOUT
+            ) as resp:
+                http_status = resp.status
+                response_data = await resp.read()
+                data, grpc_status, grpc_message = _merge_grpc_status(
+                    resp.headers.get("grpc-status", ""),
+                    resp.headers.get("grpc-message", ""),
+                    response_data,
                 )
-                return b"", False
-            if not data:
-                _LOGGER.debug("%s returned an empty payload", method)
-            return data, True
+            expired = grpc_status == GRPC_UNAUTHENTICATED or http_status == 401
+            if expired and attempt == 1 and self._token_provider is not None:
+                _LOGGER.debug("%s: token rejected, retrying with a new one", method)
+                continue
+            break
+
+        if grpc_status and grpc_status != "0":
+            log(
+                "gRPC error calling %s: status=%s message=%s",
+                method,
+                grpc_status,
+                grpc_message or "unknown",
+            )
+            return b"", False
+        if http_status != 200:
+            log("HTTP error calling %s: status=%s", method, http_status)
+            return b"", False
+        if not data:
+            _LOGGER.debug("%s returned an empty payload", method)
+        return data, True
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
         """Get dashboard root data, including the numeric service location id."""
@@ -528,9 +515,6 @@ class BasePowerApiClient:
     async def get_recent_usage(self, service_location_id: str) -> list[dict[str, Any]]:
         """Get recent 15-min interval usage. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
-        _LOGGER.debug(
-            "MobileGetRecentUsage request using=address payload=%s", payload.hex()
-        )
         data = await self._call("MobileGetRecentUsage", payload)
         return self._parse_recent_usage(data)
 
@@ -592,36 +576,24 @@ class BasePowerApiClient:
                 "falling back to address id"
             )
         payload = _encode_service_location_request(service_location_id)
-        _LOGGER.debug(
-            "MobileGetUsageEnergy request using=address payload=%s", payload.hex()
-        )
         raw = await self._call("MobileGetUsageEnergy", payload, optional=True)
         return self._parse_usage_energy(raw, time_zone=time_zone, now=now)
 
     async def get_billing_metadata(self, service_location_id: str) -> dict[str, Any]:
         """Get billing info. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
-        _LOGGER.debug(
-            "MobileGetBillingMetadata request using=address payload=%s", payload.hex()
-        )
         data = await self._call("MobileGetBillingMetadata", payload, optional=True)
         return self._parse_billing_metadata(data)
 
     async def get_wifi_metrics(self, service_location_id: str) -> dict[str, Any]:
         """Get battery WiFi metrics. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
-        _LOGGER.debug(
-            "MobileGetWifiMetrics request using=address payload=%s", payload.hex()
-        )
         data = await self._call("MobileGetWifiMetrics", payload, optional=True)
         return self._parse_wifi_metrics(data)
 
     async def get_usage_cycles(self, service_location_id: str) -> dict[str, Any]:
-        """Get usage cycles and the asset id. The address string is the site id."""
+        """Get usage cycles and the account id. The address string is the site id."""
         payload = _encode_service_location_request(service_location_id)
-        _LOGGER.debug(
-            "MobileGetUsageCycles request using=address payload=%s", payload.hex()
-        )
         data = await self._call("MobileGetUsageCycles", payload, optional=True)
         return self._parse_usage_cycles(data)
 
@@ -636,6 +608,20 @@ class BasePowerApiClient:
             service=f"{api_v2.V2_PACKAGE}.BatteryService",
         )
         return api_v2.parse_battery_snapshot(data)
+
+    async def get_daily_energy(
+        self, address_id: str, start: int, end: int
+    ) -> list[dict[str, Any]]:
+        """Daily home and solar kWh for [start, end). Base keeps about a month."""
+        from . import api_v2
+
+        data = await self._call(
+            "GetDailyEnergy",
+            api_v2.encode_daily_energy_request(address_id, start, end),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.UsageService",
+        )
+        return api_v2.parse_daily_energy(data)
 
     async def get_daily_overview(
         self, address_id: str, time_zone: str | None = None
@@ -688,6 +674,18 @@ class BasePowerApiClient:
         )
         return api_v2.parse_energy_account(data)
 
+    async def get_location(self, address_id: str) -> dict[str, Any]:
+        """Energy service, solar, and battery models for the site."""
+        from . import api_v2
+
+        data = await self._call(
+            "GetLocation",
+            api_v2.encode_address_request(address_id),
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.LocationsService",
+        )
+        return api_v2.parse_location(data)
+
     async def get_current_billing_cycle(self, address_id: str) -> dict[str, Any]:
         """Bill so far and projected bill for the energy account."""
         from . import api_v2
@@ -702,231 +700,137 @@ class BasePowerApiClient:
 
     @staticmethod
     def _parse_dashboard_root(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetDashboardRoot response."""
+        """Parse MobileGetDashboardRoot.
+
+        address (2) → timezoneIdentifier (9). battery (3) → status (2),
+        hasSolar (3), upcomingServiceDate (5). serviceLocationId (7) is the
+        numeric id that the grid and service-context calls need.
+        """
         result: dict[str, Any] = {
             "service_location_id": None,
             "battery_status": 0,
-            "battery_count": 0,
             "has_solar": False,
+            "time_zone": None,
+            "upcoming_service_at": None,
         }
-        if not data:
-            return result
-
-        _LOGGER.debug("DashboardRoot raw hex: %s", data.hex())
-
-        offset = 0
-        field3_count = 0
-        first_sub_fields: dict[int, int] = {}
-
-        while offset < len(data):
-            tag_val, new_offset = _decode_varint(data, offset)
-            if new_offset == offset:
-                break
-            offset = new_offset
-            field_num = tag_val >> 3
-            wire_type = tag_val & 0x07
-
-            if field_num == 7 and wire_type == 0:
-                # Numeric service location id. Grid and service-context calls
-                # need this int. It is not a backup duration.
-                val, offset = _decode_varint(data, offset)
-                result["service_location_id"] = val
-            elif field_num == 3 and wire_type == 2:
-                # Status sub-message — may appear once per battery unit
-                field3_count += 1
-                msg_len, offset = _decode_varint(data, offset)
-                end = offset + msg_len
-                sub_fields: dict[int, int] = {}
-                while offset < end:
-                    inner_tag_val, inner_new_offset = _decode_varint(data, offset)
-                    if inner_new_offset == offset:
-                        break
-                    offset = inner_new_offset
-                    inner_field = inner_tag_val >> 3
-                    inner_wire = inner_tag_val & 0x07
-                    if inner_wire == 0:
-                        inner_val, offset = _decode_varint(data, offset)
-                        sub_fields[inner_field] = inner_val
-                    else:
-                        offset = _skip_field(data, offset, inner_wire)
-                _LOGGER.debug(
-                    "DashboardRoot field3[%d] sub-fields: %s", field3_count, sub_fields
-                )
-                if field3_count == 1:
-                    first_sub_fields = sub_fields
-                    result["battery_status"] = sub_fields.get(2, 0)
-            elif wire_type == 2:
-                length, offset = _decode_varint(data, offset)
-                _LOGGER.debug(
-                    "DashboardRoot unknown field %d (len-delimited, %d bytes) at offset %d",
-                    field_num, length, offset,
-                )
-                offset += length
-            elif wire_type == 0:
-                val, offset = _decode_varint(data, offset)
-                _LOGGER.debug(
-                    "DashboardRoot unknown field %d (varint=%d)", field_num, val
-                )
-            else:
-                offset = _skip_field(data, offset, wire_type)
-
-        # Derive battery_count:
-        # Theory A: sub-field 1 of the first field-3 sub-message is the unit count
-        # Theory B: field-3 repeats once per battery unit
-        # Use whichever is larger; both give 1 for a 1-unit system.
-        count_from_subfield = first_sub_fields.get(1, 0)
-        result["battery_count"] = max(field3_count, count_from_subfield)
+        for field_num, kind, value in _iter_fields(data):
+            if field_num == 7 and kind == "varint":
+                result["service_location_id"] = value
+            elif field_num == 2 and kind == "bytes":
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 9 and sub_kind == "bytes":
+                        result["time_zone"] = _text(sub_value)
+            elif field_num == 3 and kind == "bytes":
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 2 and sub_kind == "varint":
+                        result["battery_status"] = sub_value
+                    elif sub_num == 3 and sub_kind == "varint":
+                        result["has_solar"] = bool(sub_value)
+                    elif sub_num == 5 and sub_kind == "bytes":
+                        result["upcoming_service_at"] = _timestamp_seconds(sub_value)
         _LOGGER.debug(
-            "DashboardRoot battery_count: field3_count=%d subfield1=%d → %d",
-            field3_count, count_from_subfield, result["battery_count"],
+            "DashboardRoot parsed: status=%s has_solar=%s has_id=%s",
+            result["battery_status"],
+            result["has_solar"],
+            result["service_location_id"] is not None,
         )
-
-        if result["battery_count"] == 0:
-            result["battery_count"] = 1
-
-        _LOGGER.debug("DashboardRoot parsed: %s", result)
         return result
 
     @staticmethod
     def _parse_recent_usage(data: bytes) -> list[dict[str, Any]]:
-        """Parse MobileGetRecentUsage response.
+        """Parse MobileGetRecentUsage.
 
-        Each entry is 15 bytes:
-          0A 0D (field 1, len 13)
-          0A 06 08 XX XX XX XX XX (Timestamp varint)
-          15 XX XX XX XX (float32, little-endian)
-
-        The float is average kW over the 15 minutes, not kWh. Energy for the
-        interval is kW / 4. Power is kW * 1000.
+        power_level_data (1, repeated) → time (1, Timestamp),
+        power_to_home_kw (2, float). The float is average kW over the 15
+        minutes, not kWh. Energy for the interval is kW / 4. Proto3 leaves
+        out a 0.0 float, so a point without field 2 is a real 0 kW.
         """
         points: list[dict[str, Any]] = []
-        if not data:
-            return points
-
-        offset = 0
-        while offset < len(data) - 14:
-            if data[offset] != 0x0A or data[offset + 1] != 0x0D:
-                break
-
-            ts = 0
-            shift = 0
-            for i in range(5):
-                byte = data[offset + 5 + i]
-                ts |= (byte & 0x7F) << shift
-                shift += 7
-                if not (byte & 0x80):
-                    break
-
-            kw = struct.unpack("<f", data[offset + 11 : offset + 15])[0]
-            offset += 15
-            if not math.isfinite(kw):
+        for field_num, kind, value in _iter_fields(data):
+            if field_num != 1 or kind != "bytes":
+                continue
+            stamp: int | None = None
+            kw = 0.0
+            for sub_num, sub_kind, sub_value in _iter_fields(value):
+                if sub_num == 1 and sub_kind == "bytes":
+                    stamp = _timestamp_seconds(sub_value)
+                elif sub_num == 2 and sub_kind == "float":
+                    kw = sub_value
+            if stamp is None or not math.isfinite(kw):
                 continue
             points.append(
                 {
-                    "timestamp": ts,
+                    "timestamp": stamp,
                     "kwh": round(kw / 4, 3),
                     "watts": round(kw * 1000),
                 }
             )
-
         return points
 
     @staticmethod
     def _parse_wifi_metrics(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetWifiMetrics response.
+        """Parse MobileGetWifiMetrics.
 
-        The API returns a WiFi scan list (field 1, repeated) — signal strengths
-        for all visible networks. There is no "connected" indicator in the response.
-        We return the full scan dict so the coordinator can look up a user-configured
-        SSID, or fall back to the strongest-signal entry.
+        wifi_metrics (1, repeated) → ssid (1), signal_strength (2).
+        last_updated (2, Timestamp). The reply does not say which network
+        the battery is on. The service context does, and the coordinator
+        uses that to pick the entry.
 
         Result keys:
-          scan    — {ssid: signal_percent} for every visible network
-          ssid    — None (set by coordinator after SSID preference lookup)
-          signal  — None (set by coordinator)
-          connected — False (set by coordinator)
+          scan         {ssid: signal percent} for every network listed
+          last_updated Unix seconds of the reading, or None
+          ssid, signal, connected: set later by apply_wifi_preference
         """
-        result: dict[str, Any] = {"scan": {}, "ssid": None, "signal": None, "connected": False}
-        if not data or len(data) < 4:
-            return result
-
-        offset = 0
-        while offset < len(data):
-            tag_val, new_offset = _decode_varint(data, offset)
-            if new_offset == offset:
-                break
-            offset = new_offset
-            field_num = tag_val >> 3
-            wire_type = tag_val & 0x07
-
-            if wire_type == 2:
-                length, offset = _decode_varint(data, offset)
-                sub = data[offset : offset + length]
-                offset += length
-                if field_num == 1:
-                    # Scan entry: field 1 = ssid (string), field 2 = signal (varint)
-                    ssid: str | None = None
-                    signal: int | None = None
-                    off = 0
-                    while off < len(sub):
-                        stag, soff = _decode_varint(sub, off)
-                        if soff == off:
-                            break
-                        off = soff
-                        sfn = stag >> 3
-                        swt = stag & 0x07
-                        if swt == 2:
-                            slen, off = _decode_varint(sub, off)
-                            val = sub[off : off + slen]
-                            off += slen
-                            if sfn == 1:
-                                try:
-                                    ssid = val.decode("utf-8")
-                                except Exception:
-                                    pass
-                        elif swt == 0:
-                            ival, off = _decode_varint(sub, off)
-                            if sfn == 2:
-                                signal = ival
-                        else:
-                            off = _skip_field(sub, off, swt)
-                    if ssid:
-                        result["scan"][ssid] = signal
-            elif wire_type == 0:
-                _, offset = _decode_varint(data, offset)
-            else:
-                offset = _skip_field(data, offset, wire_type)
-
-        _LOGGER.debug("WifiMetrics scan: %s", result["scan"])
+        result: dict[str, Any] = {
+            "scan": {},
+            "ssid": None,
+            "signal": None,
+            "connected": False,
+            "last_updated": None,
+        }
+        for field_num, kind, value in _iter_fields(data):
+            if field_num == 1 and kind == "bytes":
+                ssid: str | None = None
+                signal: int | None = None
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 1 and sub_kind == "bytes":
+                        ssid = _text(sub_value)
+                    elif sub_num == 2 and sub_kind == "varint":
+                        signal = sub_value
+                if ssid:
+                    result["scan"][ssid] = signal
+            elif field_num == 2 and kind == "bytes":
+                result["last_updated"] = _timestamp_seconds(value)
+        _LOGGER.debug("WifiMetrics: %d networks", len(result["scan"]))
         return result
 
     @staticmethod
     def _parse_usage_cycles(
         data: bytes, now: datetime | None = None
     ) -> dict[str, Any]:
-        """Parse asset id and the latest billing cycle that has already started.
+        """Parse the account id and the latest billing cycle that has already started.
 
         Field 1 repeats a cycle whose field 2 and field 3 are start and end
         timestamps. The open cycle's end is the server clock at request time,
         so it is already in the past by the time the reply is parsed. The
         current cycle is the latest start at or before ``now``; its end is
-        ignored. Field 2 at the top level is the asset id string. Lengths use
+        ignored. Field 2 at the top level is accountId. Lengths use
         varints, so an entry longer than 127 bytes still parses.
         ``cycle_start`` is that Unix second, or None.
         """
-        result: dict[str, Any] = {"asset_id": None, "cycle_start": None}
+        result: dict[str, Any] = {"account_id": None, "cycle_start": None}
         if not data:
             return result
 
         cycles: list[tuple[int, int | None]] = []
         for field_num, kind, value in _iter_fields(data):
-            if field_num == 2 and kind == "bytes" and result["asset_id"] is None:
+            if field_num == 2 and kind == "bytes" and result["account_id"] is None:
                 try:
                     text = value.decode("utf-8")
                 except UnicodeDecodeError:
                     text = ""
                 if text and text.isprintable():
-                    result["asset_id"] = text
+                    result["account_id"] = text
             elif field_num == 1 and kind == "bytes":
                 start: int | None = None
                 end: int | None = None
@@ -969,6 +873,9 @@ class BasePowerApiClient:
             "home_has_power": None,
             "state_of_energy_raw": None,
             "available_backup_hours": None,
+            "available_backup_hours_750w": None,
+            "wifi_ssid": None,
+            "wifi_state": None,
             "power_from_grid_kw": None,
             "power_from_storage_kw": None,
             "power_from_solar_kw": None,
@@ -1027,7 +934,9 @@ class BasePowerApiClient:
         """Parse MobileGetServiceContext.
 
         stateOfEnergyRaw is the battery percent. availableBackup is hours at
-        the current load. A missing bool on a present message is false.
+        the current load, availableBackupAt750W at a steady 750 W.
+        gatewayWifi is the network the battery is on. A missing bool on a
+        present message is false.
         """
         result = BasePowerApiClient._empty_service_context()
         if not data:
@@ -1050,6 +959,16 @@ class BasePowerApiClient:
                 result["home_has_power"] = bool(value)
             elif field_num == 10 and kind == "bytes":
                 power_flow = value
+            elif field_num == 11 and kind in ("float", "double"):
+                result["available_backup_hours_750w"] = value
+            elif field_num == 4 and kind == "bytes":
+                state = 0
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 1 and sub_kind == "bytes":
+                        result["wifi_ssid"] = _text(sub_value)
+                    elif sub_num == 2 and sub_kind == "varint":
+                        state = sub_value
+                result["wifi_state"] = GATEWAY_WIFI_STATES.get(state)
 
         for key in ("has_gateway", "gateway_connected", "is_active_outage", "home_has_power"):
             if result[key] is None:
@@ -1081,6 +1000,7 @@ class BasePowerApiClient:
         """Merge service context and grid voltage into the coordinator grid dict."""
         soc = context.get("state_of_energy_raw")
         backup = context.get("available_backup_hours")
+        backup_750w = context.get("available_backup_hours_750w")
         return {
             "available": bool(context.get("available") or voltage.get("available")),
             "has_gateway": (
@@ -1099,6 +1019,9 @@ class BasePowerApiClient:
             "voltage_samples": voltage.get("voltage_samples") or 0,
             "battery_soc_percent": None if soc is None else float(soc),
             "backup_hours": None if backup is None else round(float(backup), 2),
+            "backup_hours_750w": None if backup_750w is None else round(float(backup_750w), 2),
+            "wifi_ssid": context.get("wifi_ssid"),
+            "wifi_state": context.get("wifi_state"),
             "power_from_grid_kw": context.get("power_from_grid_kw"),
             "power_from_storage_kw": context.get("power_from_storage_kw"),
             "power_from_solar_kw": context.get("power_from_solar_kw"),
@@ -1147,7 +1070,6 @@ class BasePowerApiClient:
         if not data:
             return result
 
-        _LOGGER.debug("UsageEnergy raw hex: %s", data.hex())
         grid: list[float] = []
         solar: list[float] | None = None
         stamps: list[int | None] = []
@@ -1185,20 +1107,22 @@ class BasePowerApiClient:
 
     @staticmethod
     def _parse_billing_metadata(data: bytes) -> dict[str, Any]:
-        """Parse MobileGetBillingMetadata response.
+        """Parse MobileGetBillingMetadata.
 
-        Some accounts return amount_cents as a top-level field 2 varint.
-        Others wrap it in a field 1 sub-message, for example
-        0a0a080210a5930118b0880212020802 → field 2 = 18853 ($188.53).
+        rep (1) → activeSpendCents (2), lastBillAmountCents (3). For example
+        0a0a080210a5930118b0880212020802 is $188.53 spent so far and a last
+        bill of $338.40. The message has no due date. That comes from the
+        newer ListAccounts call.
         """
-        result: dict[str, Any] = {
-            "amount_cents": None,
-            "due_date": None,
-        }
-        if not data:
-            return result
-
-        _LOGGER.debug("BillingMetadata raw hex: %s", data.hex())
-        _parse_billing_fields(data, result)
-        _LOGGER.debug("BillingMetadata parsed: %s", result)
+        result: dict[str, Any] = {"amount_cents": None, "last_bill_cents": None}
+        for field_num, kind, value in _iter_fields(data):
+            if field_num != 1 or kind != "bytes":
+                continue
+            for sub_num, sub_kind, sub_value in _iter_fields(value):
+                if sub_kind != "varint":
+                    continue
+                if sub_num == 2:
+                    result["amount_cents"] = sub_value
+                elif sub_num == 3:
+                    result["last_bill_cents"] = sub_value
         return result

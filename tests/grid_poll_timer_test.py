@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import sys
 import types
 from pathlib import Path
 
@@ -15,18 +14,13 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
-from homeassistant.core import HomeAssistant  # noqa: E402
-from homeassistant.helpers import frame  # noqa: E402
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import frame
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_coordinator_module():
-    components = sys.modules.get("custom_components")
-    if components is None or not hasattr(components, "__path__"):
-        components = types.ModuleType("custom_components")
-        components.__path__ = [str(_ROOT / "custom_components")]
-        sys.modules["custom_components"] = components
     return importlib.import_module("custom_components.base_power.coordinator")
 
 

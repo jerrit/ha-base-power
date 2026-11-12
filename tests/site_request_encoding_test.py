@@ -7,11 +7,8 @@ contain a real address, account id, or captured payload.
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import logging
 import struct
-import sys
-import types
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,33 +17,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PKG = "custom_components.base_power"
 
 
-def _load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(
-        name, _ROOT / "custom_components" / "base_power" / filename
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+from custom_components.base_power import api as _api  # noqa: E402
+from custom_components.base_power import auth as _auth  # noqa: E402
 
-
-def _load_api():
-    if _PKG + ".api" in sys.modules:
-        return sys.modules[_PKG + ".api"]
-    components = types.ModuleType("custom_components")
-    components.__path__ = [str(_ROOT / "custom_components")]
-    package = types.ModuleType(_PKG)
-    package.__path__ = [str(_ROOT / "custom_components" / "base_power")]
-    package.__package__ = _PKG
-    sys.modules["custom_components"] = components
-    sys.modules[_PKG] = package
-    _load(_PKG + ".const", "const.py")
-    return _load(_PKG + ".api", "api.py")
-
-
-_api = _load_api()
-_auth = _load(_PKG + ".auth", "auth.py")
 BasePowerApiClient = _api.BasePowerApiClient
 local_day_interval = _api.local_day_interval
 summarize_recent_usage = _api.summarize_recent_usage
@@ -231,7 +204,7 @@ def test_usage_energy_malformed_stays_none():
 
 def test_billing_empty_submessages_stay_none():
     parsed = BasePowerApiClient._parse_billing_metadata(bytes.fromhex("0a001200"))
-    assert parsed == {"amount_cents": None, "due_date": None}
+    assert parsed == {"amount_cents": None, "last_bill_cents": None}
 
 
 def test_usage_cycles_parse_a_long_entry_and_the_current_start():
@@ -243,11 +216,11 @@ def test_usage_cycles_parse_a_long_entry_and_the_current_start():
     older = _timestamp(2, past[0]) + _timestamp(3, past[1])
     payload = _len_field(1, older) + _len_field(1, entry) + b"\x12\x07asset-1"
     parsed = BasePowerApiClient._parse_usage_cycles(payload, NOW)
-    assert parsed["asset_id"] == "asset-1"
+    assert parsed["account_id"] == "asset-1"
     assert parsed["cycle_start"] == HOUR_MIDNIGHT
 
     asset_only = BasePowerApiClient._parse_usage_cycles(b"\x12\x07asset-1", NOW)
-    assert asset_only["asset_id"] == "asset-1"
+    assert asset_only["account_id"] == "asset-1"
     assert asset_only["cycle_start"] is None
 
 
@@ -376,6 +349,8 @@ def test_invoke_reads_header_status_trailer_status_and_success():
     trailer_ok = b"grpc-status: 0\r\n"
 
     class _Response:
+        status = 200
+
         def __init__(self, body: bytes, headers: dict[str, str]) -> None:
             self.headers = headers
             self._body = body

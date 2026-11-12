@@ -8,9 +8,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import importlib
-import sys
+import time
 import types
 from pathlib import Path
 
@@ -18,18 +17,13 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
-from homeassistant.core import HomeAssistant  # noqa: E402
-from homeassistant.helpers import frame  # noqa: E402
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import frame
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _modules():
-    components = sys.modules.get("custom_components")
-    if components is None or not hasattr(components, "__path__"):
-        components = types.ModuleType("custom_components")
-        components.__path__ = [str(_ROOT / "custom_components")]
-        sys.modules["custom_components"] = components
     coordinator = importlib.import_module("custom_components.base_power.coordinator")
     api = importlib.import_module("custom_components.base_power.api")
     v2 = importlib.import_module("custom_components.base_power.api_v2")
@@ -71,6 +65,8 @@ def _compose(
             coordinator._config_entry = types.SimpleNamespace(options={})
             coordinator._prev_soc = None
             coordinator._poll = poll.PollState()
+            coordinator._totals = coordinator_mod.EnergyTotals()
+            coordinator._totals_store = None
             coordinator._poll.energy = {
                 "grid_to_home_kwh": energy_grid,
                 "solar_to_home_kwh": energy_solar,
@@ -181,11 +177,14 @@ class FakeApi:
         self.v2_voltage: float | None = 244.8
         self.snapshot_state = "on_grid"
         self.fail_snapshot = False
+        self.fail_context = False
 
     combine_grid_telemetry = None  # set in __init__ below
 
     async def get_service_context(self, numeric_id):
         self.calls.append("ServiceContext")
+        if self.fail_context:
+            raise ConnectionError("down")
         context = self._api._empty_service_context()
         context.update(self.context)
         return context
@@ -231,6 +230,8 @@ async def _coordinator(hass):
     coordinator._config_entry = types.SimpleNamespace(options={})
     coordinator._prev_soc = None
     coordinator._poll = poll.PollState()
+    coordinator._totals = coordinator_mod.EnergyTotals()
+    coordinator._totals_store = None
     coordinator._poll.numeric_id = 7
     coordinator._poll.mark_slow(coordinator._monotonic())
     coordinator._grid = _grid(api, volts=245.0)
@@ -262,6 +263,52 @@ def _run_polls(setup, polls: int):
             await hass.async_stop(force=True)
 
     return asyncio.run(run())
+
+
+def _context_polls(hass_steps):
+    """Run polls with a fake clock. Each step is (seconds since start, context fails)."""
+
+    async def run():
+        hass = HomeAssistant(str(_ROOT))
+        frame.async_setup(hass)
+        try:
+            coordinator, fake = await _coordinator(hass)
+            fake.context = {
+                "available": True, "is_active_outage": False, "home_has_power": True,
+                "state_of_energy_raw": 99, "power_to_home_kw": 1.4,
+            }
+            clock = {"t": 1000.0}
+            coordinator._monotonic = lambda: clock["t"]
+            out = []
+            for at, fails in hass_steps:
+                clock["t"] = 1000.0 + at
+                fake.fail_context = fails
+                await coordinator.async_poll_grid_status()
+                out.append(coordinator.data["grid"])
+            return out
+        finally:
+            await hass.async_stop(force=True)
+
+    return asyncio.run(run())
+
+
+def test_one_missed_service_context_keeps_the_last_reading():
+    grids = _context_polls([(0, False), (60, True), (120, False)])
+    assert [g["power_to_home_kw"] for g in grids] == [1.4, 1.4, 1.4]
+    assert grids[1]["battery_soc_percent"] == grids[0]["battery_soc_percent"]
+    assert grids[1]["battery_soc_percent"] is not None
+
+
+def test_service_context_down_for_minutes_goes_unknown():
+    grids = _context_polls([(0, False), (60, True), (180, True), (240, True)])
+    assert grids[2]["power_to_home_kw"] == 1.4  # 3 minutes: still held
+    assert grids[3]["power_to_home_kw"] is None
+    assert grids[3]["battery_soc_percent"] is None
+
+
+def test_no_held_context_before_the_first_good_one():
+    grids = _context_polls([(0, True)])
+    assert grids[0]["power_to_home_kw"] is None
 
 
 def _snapshot_polls(results):
@@ -321,7 +368,7 @@ def test_no_voltage_from_either_api_stays_unknown():
         fake.voltage = None
         fake.v2_voltage = None
 
-    calls, data = _run_polls(none, 1)[0]
+    _calls, data = _run_polls(none, 1)[0]
     assert data["grid"]["voltage_volts"] is None
     assert data["grid"]["grid_is_up"] is None
     assert data["sources"]["voltage"] is None
@@ -348,7 +395,7 @@ def test_grid_power_data_records_the_battery_state_behind_an_off_state():
     assert _compose("on_grid")["grid"]["battery_state"] == "on_grid"
 
 
-def _capacity(options, sku):
+def _capacity(options, sku, batteries=None, hours=None):
     coordinator_mod, api, v2, poll = _modules()
 
     async def run():
@@ -360,11 +407,21 @@ def _capacity(options, sku):
             coordinator._config_entry = types.SimpleNamespace(options=options)
             coordinator._prev_soc = None
             coordinator._poll = poll.PollState()
+            coordinator._totals = coordinator_mod.EnergyTotals()
+            coordinator._totals_store = None
             coordinator._poll.battery_account = {"plan_name": None, "hardware_sku": sku,
                                                  "equipment_description": None}
+            if batteries is not None:
+                coordinator._poll.location = dict(v2.empty_location(), available=True,
+                                                  batteries=batteries)
+            if hours is not None:
+                coordinator._poll.overview = dict(v2.empty_overview(), available=True, hours=hours)
+                coordinator._update_totals()
             coordinator._grid = _grid(api, volts=245.0)
             coordinator._snapshot = v2.empty_snapshot()
             data = coordinator._compose()
+            if hours is not None:
+                return data["derived"]
             return data["dashboard"], data["derived"]["capacity_kwh"]
         finally:
             await hass.async_stop(force=True)
@@ -454,3 +511,38 @@ def test_event_list_still_turns_grid_support_on():
 def test_grid_support_is_unknown_without_any_data():
     data = _compose("on_grid", storage_kw=None)
     assert data["derived"]["grid_support_active"] is None
+
+
+def _models(*pairs):
+    return [{"generation": g, "variant": v} for g, v in pairs]
+
+
+def test_battery_model_fills_capacity_without_a_sku():
+    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, None, _models(("GEN1", "DUAL")))
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (50, 2, "model")
+    dashboard, kwh = _capacity({}, None, _models(("GEN1", "SINGLE"), ("GEN1", "SINGLE")))
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (50, 2, "model")
+    dashboard, kwh = _capacity({}, None, _models(("GEN1", "WALL")))
+    assert (kwh, dashboard["capacity_source"]) == (20, "model")
+
+
+def test_known_sku_wins_over_the_battery_model():
+    dashboard, kwh = _capacity({}, "GRO_SINGLE", _models(("GEN1", "DUAL")))
+    assert (kwh, dashboard["capacity_source"], dashboard["model_capacity_kwh"]) == (25, "sku", 50)
+
+
+def test_unconfirmed_models_fall_back_to_the_saved_capacity():
+    for models in (_models(("GEN3", "SINGLE")), _models(("GEN1", "SINGLE"), (None, None)), []):
+        dashboard, kwh = _capacity({"battery_capacity": "40 kWh (1 Core)"}, None, models)
+        assert (kwh, dashboard["capacity_source"]) == (40, "option")
+        assert dashboard["model_capacity_kwh"] is None
+
+
+def test_running_totals_include_every_hour_and_start_unknown():
+    derived = _capacity({}, "GRO_SINGLE", hours=[])
+    assert derived["home_usage_total_kwh"] is None
+    derived = _capacity({}, "GRO_SINGLE", hours=[
+        {"start": 1_800_000_000 - 3600, "home_kwh": 1.3, "solar_kwh": 0.0},
+        {"start": 1_800_000_000, "home_kwh": 0.7, "solar_kwh": 0.25},
+    ])
+    assert (derived["home_usage_total_kwh"], derived["solar_total_kwh"]) == (2.0, 0.25)
