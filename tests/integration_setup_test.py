@@ -169,7 +169,8 @@ async def test_a_failed_slow_call_is_retried_on_the_next_usage_refresh(
     entry = await setup_integration()
     coordinator = entry.runtime_data
     assert coordinator._poll.slow_failed is True
-    assert coordinator._poll.slow_due(coordinator._poll.last_slow_at + 15 * 60, first=False)
+    # Just past 15 minutes: (t + 900) - t can round to 899.999... on some clocks.
+    assert coordinator._poll.slow_due(coordinator._poll.last_slow_at + 15 * 60 + 1, first=False)
     fake_api.fail = set()
     coordinator._poll.last_slow_at -= 15 * 60
     await coordinator.async_refresh()
