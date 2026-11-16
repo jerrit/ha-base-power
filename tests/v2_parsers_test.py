@@ -405,20 +405,20 @@ def test_location_reads_energy_service_solar_and_onsite_batteries():
     assert parsed["available"] is True
     assert parsed["energy_service"] == "no_service"
     assert parsed["has_solar"] is False
-    assert parsed["batteries"] == [{"generation": "GEN1", "variant": "SINGLE"}]
+    assert parsed["batteries"] == [{"generation": "GEN1", "variant": "SINGLE", "generation_code": 1, "variant_code": 1}]
 
 
 def test_location_reads_planned_batteries_and_solar():
     parsed = v2.parse_location(_site(5, 3, msg(1, _battery(2, 2)), caps=num(1, 1)))
     assert parsed["energy_service"] == "active"
     assert parsed["has_solar"] is True
-    assert parsed["batteries"] == [{"generation": "GEN3", "variant": "DUAL"}]
+    assert parsed["batteries"] == [{"generation": "GEN3", "variant": "DUAL", "generation_code": 2, "variant_code": 2}]
 
 
 def test_location_unknown_enums_and_empty_reply():
     parsed = v2.parse_location(_site(None, 5, msg(4, _battery(9, 9))))
     assert parsed["energy_service"] is None
-    assert parsed["batteries"] == [{"generation": None, "variant": None}]
+    assert parsed["batteries"] == [{"generation": None, "variant": None, "generation_code": 9, "variant_code": 9}]
     assert v2.parse_location(b"") == v2.empty_location()
 
 
@@ -460,7 +460,7 @@ def test_location_reads_the_site_time_zone_and_next_service():
     parsed = v2.parse_location(msg(1, location))
     assert parsed["time_zone"] == "America/Chicago"
     assert parsed["upcoming_service_at"] == 1_800_500_000
-    assert parsed["batteries"] == [{"generation": "GEN1", "variant": "SINGLE"}]
+    assert parsed["batteries"] == [{"generation": "GEN1", "variant": "SINGLE", "generation_code": 1, "variant_code": 1}]
     # The street and city are not kept.
     assert "Main" not in str(parsed)
 

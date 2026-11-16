@@ -21,7 +21,8 @@ CLERK_JS_VERSION = "5"
 #   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles
 #     + v2 CurrentBillingCycle + v2 battery GetAccount + v2 ListAccounts
 #     + v2 GetLocation + v2 GetDailyEnergy (about 1.5/hour). After a failed
-#     call this tier runs again 15 minutes later.
+#     call this tier runs again after 15 minutes, then 30, 60, and so on,
+#     up to 6 hours.
 # The v2 GetRecentGridVoltage runs only when GridStatus has no voltage.
 # The coordinator interval is the 15-minute tier. It does not repeat the
 # 60-second grid calls.
@@ -29,6 +30,9 @@ REQUEST_TIMEOUT_SECONDS = 20
 GRID_SCAN_INTERVAL_SECONDS = 60
 USAGE_SCAN_INTERVAL_SECONDS = 15 * 60
 SLOW_SCAN_INTERVAL_SECONDS = 6 * 60 * 60
+# After a failed slow refresh, the retry waits 15 minutes, then doubles after
+# each failure in a row, up to the normal 6 hours.
+SLOW_RETRY_MAX_SECONDS = SLOW_SCAN_INTERVAL_SECONDS
 SCAN_INTERVAL_SECONDS = USAGE_SCAN_INTERVAL_SECONDS
 # MobileGetGridStatus reports about 240 V while the grid is up.
 # 100 V is still grid. Under 50 V the feed has collapsed.
@@ -36,19 +40,19 @@ GRID_PRESENT_VOLTS = 100.0
 GRID_COLLAPSED_VOLTS = 50.0
 
 # Battery capacity options: label → (units, kWh).
-# Base lists Core as 39.2 kWh per unit (78.4 kWh for two). The dropdown uses
-# the rounded sizes, 40 and 80. Original hardware is already 25 and 50.
+# Core uses Base's published sizes, 39.2 kWh per unit (78.4 kWh for two), the
+# same as SKU detection. Older versions saved the rounded 40 and 80 labels.
 BATTERY_CAPACITY_OPTIONS: dict[str, tuple[int, float]] = {
     "20 kWh (1 Wall)": (1, 20),
     "25 kWh (1 unit)": (1, 25),
-    "40 kWh (1 Core)": (1, 40),
+    "39.2 kWh (1 Core)": (1, 39.2),
     "50 kWh (2 units)": (2, 50),
-    "80 kWh (2 Core)": (2, 80),
+    "78.4 kWh (2 Core)": (2, 78.4),
 }
 _BATTERY_CAPACITY_ALIASES = {
-    "39.2 kWh (1 Core)": "40 kWh (1 Core)",
-    "40 kWh (1 unit)": "40 kWh (1 Core)",
-    "78.4 kWh (2 Core)": "80 kWh (2 Core)",
+    "40 kWh (1 Core)": "39.2 kWh (1 Core)",
+    "40 kWh (1 unit)": "39.2 kWh (1 Core)",
+    "80 kWh (2 Core)": "78.4 kWh (2 Core)",
 }
 DEFAULT_BATTERY_CAPACITY = "25 kWh (1 unit)"
 # Battery hardware SKU from the v2 battery account → (units, kWh).
@@ -118,6 +122,8 @@ CONF_EMAIL = "email"
 CONF_WIFI_SSID = "wifi_ssid"
 CONF_BATTERY_COUNT = "battery_count_override"
 CONF_BATTERY_CAPACITY = "battery_capacity"
+# Street and city from the setup site picker. Names the device.
+CONF_SITE_LABEL = "site_label"
 
 # Running energy totals, saved across restarts
 STORAGE_VERSION = 1
@@ -138,8 +144,15 @@ DAY_REPAIR_MIN_KWH = 0.05
 
 # The usage tier is stale after this many refreshes in a row with no new data.
 USAGE_STALE_AFTER_FAILURES = 4
-# Battery Charging stays on this long after the last rise in charge.
+# Battery Charging stays on for a while after a rise in charge, since Base
+# reports whole percents. One rise holds it for the short hold. Once two
+# rises are seen, the hold is twice the time between them, up to the long
+# hold. A slow charge can take hours per percent.
+CHARGING_FIRST_HOLD_SECONDS = 3600
 CHARGING_HOLD_SECONDS = 3 * 3600
+# A rise back to the level the charge just fell from is rounding, not
+# charging, when it comes within this long of the fall.
+CHARGING_BOUNCE_SECONDS = 3600
 # A missed ServiceContext reuses the last good one for this long, so one
 # failed 60-second call does not blank the live sensors.
 CONTEXT_HOLD_SECONDS = 3 * 60

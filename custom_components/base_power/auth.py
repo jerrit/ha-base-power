@@ -30,10 +30,12 @@ _TIMEOUT = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
 def is_auth_rejection(status: int) -> bool:
     """True when Clerk's answer means the session is gone and the user must sign in.
 
-    A rate limit (429), a timeout (408, 425), or a server error is temporary.
-    Treating those as a rejection would ask for a new sign-in after a blip.
+    Only 401 (signed out), 404 (session not found), and 422 (session ended)
+    mean that. Anything else, such as a 403 from Clerk's bot protection, a
+    rate limit, or a server error, is temporary. Treating those as a
+    rejection would ask for a new sign-in after a blip.
     """
-    return 400 <= status < 500 and status not in (408, 425, 429)
+    return status in (401, 404, 422)
 
 
 # Refresh JWT 10 seconds before expiry

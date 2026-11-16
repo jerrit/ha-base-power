@@ -21,6 +21,7 @@ from .const import (
     CONF_SERVICE_LOCATION_ID,
     CONF_SESSION_ID,
     CONF_SESSION_JWT,
+    CONF_SITE_LABEL,
     DOMAIN,
     GRID_SCAN_INTERVAL_SECONDS,
     PLATFORMS,
@@ -71,6 +72,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: BasePowerConfigEntry) ->
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
 
+    await _async_backfill_site_label(hass, entry, session, auth)
+
     _remove_wifi_select(hass, entry)
 
     # Live grid and battery every 60 seconds. The coordinator refresh is the
@@ -86,6 +89,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: BasePowerConfigEntry) ->
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+
+async def _async_backfill_site_label(
+    hass: HomeAssistant, entry: BasePowerConfigEntry, session, auth: BasePowerAuth
+) -> None:
+    """Look up the site's street and city once, for entries set up before 1.14.
+
+    The device is named after it. An empty label means Base had none, so
+    the lookup is not repeated. A failed lookup tries again next start.
+    """
+    if entry.data.get(CONF_SITE_LABEL) is not None:
+        return
+    site_id = entry.data[CONF_SERVICE_LOCATION_ID]
+    try:
+        jwt = await auth.async_ensure_valid_token()
+        locations = await BasePowerApiClient.async_discover_locations(session, jwt)
+    except Exception as err:
+        _LOGGER.debug("Site label lookup failed: %s", err)
+        return
+    label = next(
+        (loc.get("label") for loc in locations if loc.get("address_id") == site_id), None
+    )
+    if label == site_id:
+        label = None
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_SITE_LABEL: label or ""}
+    )
 
 
 def _remove_wifi_select(hass: HomeAssistant, entry: BasePowerConfigEntry) -> None:

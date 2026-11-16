@@ -195,10 +195,14 @@ def parse_location(data: bytes) -> dict[str, Any]:
                     if sub_num != list_field or sub_kind != "bytes":
                         continue
                     numbers = {f: v for f, k, v in _iter_fields(battery) if k == "varint"}
+                    # The raw codes stay, so unmapped hardware (GEN3) can
+                    # be reported and mapped later.
                     result["batteries"].append(
                         {
                             "generation": BATTERY_GENERATIONS.get(numbers.get(2, 0)),
                             "variant": BATTERY_VARIANTS.get(numbers.get(3, 0)),
+                            "generation_code": numbers.get(2, 0),
+                            "variant_code": numbers.get(3, 0),
                         }
                     )
         elif field_num == 4:

@@ -322,3 +322,48 @@ async def test_battery_only_home_has_no_empty_billing_sensors(hass, setup_integr
     for name in ("last_bill_amount", "bill_due_date", "bill_to_date", "energy_cost_today"):
         assert hass.states.get(f"sensor.{PREFIX}_{name}") is None
     assert _state(hass, "sensor", "home_usage_total") == "2.0"
+
+
+async def test_an_older_entry_gets_its_site_label_once(hass):
+    from unittest.mock import AsyncMock, patch
+
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.base_power import _async_backfill_site_label
+
+    entry = MockConfigEntry(domain=DOMAIN, data={"service_location_id": "site-1"})
+    entry.add_to_hass(hass)
+    auth = AsyncMock()
+    auth.async_ensure_valid_token.return_value = "jwt"
+    found = AsyncMock(return_value=[{"address_id": "site-1", "label": "1 Main St, Austin"}])
+    with patch(
+        "custom_components.base_power.BasePowerApiClient.async_discover_locations", found
+    ):
+        await _async_backfill_site_label(hass, entry, None, auth)
+        await _async_backfill_site_label(hass, entry, None, auth)
+    assert entry.data["site_label"] == "1 Main St, Austin"
+    assert found.await_count == 1
+
+
+async def test_a_failed_site_label_lookup_tries_again_next_start(hass):
+    from unittest.mock import AsyncMock, patch
+
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.base_power import _async_backfill_site_label
+
+    entry = MockConfigEntry(domain=DOMAIN, data={"service_location_id": "site-1"})
+    entry.add_to_hass(hass)
+    auth = AsyncMock()
+    auth.async_ensure_valid_token.side_effect = RuntimeError("down")
+    await _async_backfill_site_label(hass, entry, None, auth)
+    assert "site_label" not in entry.data
+    # Only the old id-only answer: Base has no street to show. Not asked again.
+    auth.async_ensure_valid_token.side_effect = None
+    auth.async_ensure_valid_token.return_value = "jwt"
+    with patch(
+        "custom_components.base_power.BasePowerApiClient.async_discover_locations",
+        AsyncMock(return_value=[{"address_id": "site-1", "label": "site-1"}]),
+    ):
+        await _async_backfill_site_label(hass, entry, None, auth)
+    assert entry.data["site_label"] == ""

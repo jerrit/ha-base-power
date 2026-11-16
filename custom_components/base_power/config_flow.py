@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_EMAIL
 from homeassistant.data_entry_flow import AbortFlow
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
@@ -25,6 +25,7 @@ from .const import (
     CONF_CLIENT_TOKEN,
     CONF_SERVICE_LOCATION_ID,
     CONF_SESSION_ID,
+    CONF_SITE_LABEL,
     CONF_WIFI_SSID,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_BATTERY_COUNT,
@@ -123,6 +124,23 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._session_id: str = ""
         self._service_location_id: str = ""
         self._locations: list[dict[str, str]] = []
+        # Street and city of the chosen site, for the device name
+        self._site_label: str | None = None
+
+    def _session(self):
+        """A Home Assistant session for one sign-in step.
+
+        Clerk sets cookies, so each step gets its own session, not the
+        shared one. It is closed when the step ends.
+        """
+        return async_create_clientsession(self.hass, auto_cleanup=False)
+
+    def _remember_label(self, address_id: str) -> None:
+        for loc in self._locations:
+            if loc["address_id"] == address_id:
+                label = loc.get("label")
+                self._site_label = label if label and label != address_id else None
+                return
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -134,7 +152,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._email = user_input[CONF_EMAIL]
 
             try:
-                async with aiohttp.ClientSession() as session:
+                async with self._session() as session:
                     result = await BasePowerAuth.async_initiate_sign_in(
                         session, self._email, CLERK_PUBLISHABLE_KEY
                     )
@@ -178,7 +196,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             code = user_input["code"]
 
             try:
-                async with aiohttp.ClientSession() as session:
+                async with self._session() as session:
                     result = await BasePowerAuth.async_attempt_first_factor(
                         session,
                         self._sign_in_id,
@@ -220,13 +238,14 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     locations = [
                         loc for loc in locations if loc["address_id"] not in configured
                     ] or locations[:1]
+                    self._locations = locations
                     if len(locations) == 1:
                         _LOGGER.info("Found one Base Power site")
+                        self._remember_label(locations[0]["address_id"])
                         return await self.async_step_location(
                             {CONF_SERVICE_LOCATION_ID: locations[0]["address_id"]}
                         )
                     if locations:
-                        self._locations = locations
                         return await self.async_step_pick_location()
                     return await self.async_step_location()
             except AbortFlow:
@@ -249,6 +268,7 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Step 3a: Choose a site when the account has more than one."""
         if user_input is not None:
+            self._remember_label(user_input[CONF_SERVICE_LOCATION_ID])
             return await self.async_step_location(
                 {CONF_SERVICE_LOCATION_ID: user_input[CONF_SERVICE_LOCATION_ID]}
             )
@@ -284,19 +304,22 @@ class BasePowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_SERVICE_LOCATION_ID: service_location_id,
             }
 
+            if self._site_label:
+                entry_data[CONF_SITE_LABEL] = self._site_label
+
             # During reauth, update the existing entry instead of creating a new one
             if self.source == config_entries.SOURCE_REAUTH:
-                return self.async_update_reload_and_abort(
-                    self._get_reauth_entry(),
-                    data=entry_data,
-                )
+                reauth_entry = self._get_reauth_entry()
+                if CONF_SITE_LABEL in reauth_entry.data:
+                    entry_data.setdefault(CONF_SITE_LABEL, reauth_entry.data[CONF_SITE_LABEL])
+                return self.async_update_reload_and_abort(reauth_entry, data=entry_data)
 
             # Set unique ID to prevent duplicates
             await self.async_set_unique_id(service_location_id)
             self._abort_if_unique_id_configured()
 
             return self.async_create_entry(
-                title=f"Base Power ({service_location_id})",
+                title=f"Base Power ({self._site_label or service_location_id})",
                 data=entry_data,
             )
 

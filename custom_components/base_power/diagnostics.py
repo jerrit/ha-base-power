@@ -18,6 +18,7 @@ from .const import (
     CONF_SERVICE_LOCATION_ID,
     CONF_SESSION_ID,
     CONF_SESSION_JWT,
+    CONF_SITE_LABEL,
     CONF_WIFI_SSID,
 )
 from .entity import BasePowerConfigEntry
@@ -28,6 +29,7 @@ TO_REDACT = {
     CONF_SESSION_JWT,
     CONF_EMAIL,
     CONF_SERVICE_LOCATION_ID,
+    CONF_SITE_LABEL,
     CONF_WIFI_SSID,
     "account_id",
     "scan",
@@ -51,6 +53,7 @@ async def async_get_config_entry_diagnostics(
         "poll": {
             "has_numeric_id": poll.numeric_id is not None,
             "slow_failed": poll.slow_failed,
+            "slow_failures": poll.slow_failures,
             "usage_source": poll.usage_source,
             "energy_source": poll.energy_source,
             "usage_failures": coordinator._usage_failures,

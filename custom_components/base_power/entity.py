@@ -2,23 +2,46 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_SERVICE_LOCATION_ID, DOMAIN
+from .const import CONF_SERVICE_LOCATION_ID, CONF_SITE_LABEL, DOMAIN
 from .coordinator import BasePowerCoordinator
 
 type BasePowerConfigEntry = ConfigEntry[BasePowerCoordinator]
 
+DEFAULT_MODEL = "Home Battery System"
 
-def device_info(site_id: str) -> DeviceInfo:
-    """The one device every entity of a site belongs to."""
+
+def device_model(data: dict[str, Any] | None) -> str:
+    """The battery SKU, else the battery models from the site, else a generic name."""
+    dashboard = (data or {}).get("dashboard") or {}
+    sku = dashboard.get("hardware_sku")
+    if sku and sku != "NO_BATTERY":
+        return sku
+    models = [
+        " ".join(p for p in (b.get("generation"), b.get("variant")) if p)
+        for b in dashboard.get("batteries") or []
+    ]
+    models = [m for m in models if m]
+    return " + ".join(models) if models else DEFAULT_MODEL
+
+
+def device_info(
+    site_id: str, label: str | None = None, model: str = DEFAULT_MODEL
+) -> DeviceInfo:
+    """The one device every entity of a site belongs to.
+
+    Named after the site's street and city when setup found them.
+    """
     return DeviceInfo(
         identifiers={(DOMAIN, site_id)},
-        name=f"Base Power {site_id}",
+        name=f"Base Power {label}" if label else f"Base Power {site_id}",
         manufacturer="Base Power",
-        model="Home Battery System",
+        model=model,
     )
 
 
@@ -42,7 +65,11 @@ class BasePowerEntity(CoordinatorEntity[BasePowerCoordinator]):
         self._entry = entry
         site_id = entry.data[CONF_SERVICE_LOCATION_ID]
         self._attr_unique_id = f"{site_id}_{unique_key}"
-        self._attr_device_info = device_info(site_id)
+        self._attr_device_info = device_info(
+            site_id,
+            entry.data.get(CONF_SITE_LABEL) or None,
+            device_model(coordinator.data),
+        )
 
     @property
     def available(self) -> bool:

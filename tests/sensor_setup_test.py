@@ -221,3 +221,14 @@ def test_unique_ids_are_unique_and_keep_their_old_names():
         "cycle_net_accrued_cents", "cycle_projected_charges_cents", "cycle_solar_credit_cents",
         "hardware_sku", "home_usage_total", "solar_to_home_total",
     } <= set(entities)
+
+
+def test_energy_cost_today_can_be_the_energy_dashboard_cost_entity():
+    from homeassistant.components.sensor import SensorStateClass
+
+    entities, _ = _setup(_data("active", cost=250))
+    cost = entities["energy_cost_today"]
+    assert cost.entity_description.state_class is SensorStateClass.TOTAL
+    reset = cost.last_reset
+    assert reset is not None and (reset.hour, reset.minute, reset.second) == (0, 0, 0)
+    assert entities["battery_count"].entity_description.state_class is None

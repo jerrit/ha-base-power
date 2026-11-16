@@ -67,6 +67,8 @@ class BasePowerSensorDescription(SensorEntityDescription):
     billing: bool = False
     # Only for homes with solar.
     solar_only: bool = False
+    # When a daily total last started over, for state class TOTAL.
+    last_reset_fn: Callable[[Data], datetime | None] | None = None
 
 
 def _section(data: Data, name: str) -> Data:
@@ -111,6 +113,14 @@ def _iso(seconds: int | None) -> str | None:
 def _present(**values: Any) -> dict[str, Any]:
     """Keep the attributes that have a value."""
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _local_midnight(data: Data) -> datetime | None:
+    """Start of today in the site's time zone. Base's day totals reset then."""
+    name = _section(data, "sources").get("time_zone")
+    zone = dt_util.get_time_zone(name) if name else None
+    now = dt_util.now(zone) if zone else dt_util.now()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def _grid_voltage(data: Data) -> float | None:
@@ -262,7 +272,6 @@ SENSORS: tuple[BasePowerSensorDescription, ...] = (
     BasePowerSensorDescription(
         key="battery_count",
         name="Battery Count",
-        state_class=_MEASUREMENT,
         icon="mdi:battery-multiple",
         value_fn=_derived("battery_count"),
     ),
@@ -276,7 +285,13 @@ SENSORS: tuple[BasePowerSensorDescription, ...] = (
         value_fn=_derived("capacity_kwh"),
         attributes_fn=lambda data: {
             key: _section(data, "dashboard").get(key)
-            for key in ("capacity_source", "detected_capacity_kwh", "model_capacity_kwh")
+            for key in (
+                "capacity_source",
+                "detected_capacity_kwh",
+                "model_capacity_kwh",
+                "hardware_sku",
+                "batteries",
+            )
         },
     ),
     BasePowerSensorDescription(
@@ -602,6 +617,10 @@ SENSORS: tuple[BasePowerSensorDescription, ...] = (
         name="Energy Cost Today",
         native_unit_of_measurement=CURRENCY,
         device_class=SensorDeviceClass.MONETARY,
+        # TOTAL with a midnight reset, so the Energy Dashboard can use it
+        # as the grid cost entity.
+        state_class=SensorStateClass.TOTAL,
+        last_reset_fn=_local_midnight,
         suggested_display_precision=2,
         icon="mdi:currency-usd",
         value_fn=_dollars("overview", "cost_today_cents"),
@@ -756,6 +775,14 @@ class BasePowerSensor(BasePowerEntity, SensorEntity):
         if not self.coordinator.data:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def last_reset(self) -> datetime | None:
+        """When a daily total last reset, for sensors that have one."""
+        last_reset_fn = self.entity_description.last_reset_fn
+        if last_reset_fn is None:
+            return None
+        return last_reset_fn(self.coordinator.data or {})
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:

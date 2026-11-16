@@ -25,6 +25,8 @@ from .api_v2 import (
 from .auth import AuthenticationError, BasePowerAuth
 from .const import (
     BATTERY_CAPACITY_PER_UNIT_KWH,
+    CHARGING_BOUNCE_SECONDS,
+    CHARGING_FIRST_HOLD_SECONDS,
     CHARGING_HOLD_SECONDS,
     CONF_BATTERY_CAPACITY,
     CONF_BATTERY_COUNT,
@@ -65,6 +67,13 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Last known direction of the battery's charge, and when it last rose
     _charging: bool | None = None
     _charge_rose_at: float | None = None
+    # How long the current rise holds Battery Charging on
+    _charge_hold = CHARGING_FIRST_HOLD_SECONDS
+    # The level the charge last fell from, and when
+    _fell_from: float | None = None
+    _fell_at: float | None = None
+    # Unmapped hardware already logged, so the warning shows once
+    _warned_hardware: str | None = None
 
     def __init__(
         self,
@@ -342,10 +351,15 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Whether the battery is charging.
 
         Base reports the charge as a whole percent, so one poll to the next
-        rarely differs. A rise means charging, and that holds for
-        CHARGING_HOLD_SECONDS, since a slow charge can take hours per
-        percent. A fall, a full battery, or the battery powering the home
-        means not charging. Unknown until the charge has moved once.
+        rarely differs. A rise means charging, and that holds for a while:
+        an hour after a single rise, or twice the time between the last two
+        rises (up to CHARGING_HOLD_SECONDS) once the pace is known. A slow
+        charge can take hours per percent.
+
+        A rise back to the level the charge just fell from is rounding, not
+        charging, so a battery idling at its reserve does not flick on. A
+        fall, a full battery, or the battery powering the home means not
+        charging. Unknown until the charge has moved once.
         """
         if percent is None:
             self._prev_soc = None
@@ -354,10 +368,31 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._prev_soc is not None:
             delta = percent - self._prev_soc
             if delta >= 0.5:
-                self._charging = True
-                self._charge_rose_at = now
+                bounce = (
+                    not self._charging
+                    and self._fell_from is not None
+                    and self._fell_at is not None
+                    and percent <= self._fell_from
+                    and now - self._fell_at <= CHARGING_BOUNCE_SECONDS
+                )
+                if bounce:
+                    if self._charging is None:
+                        self._charging = False
+                else:
+                    if self._charging and self._charge_rose_at is not None:
+                        gap = now - self._charge_rose_at
+                        self._charge_hold = min(
+                            max(2 * gap, CHARGING_FIRST_HOLD_SECONDS),
+                            CHARGING_HOLD_SECONDS,
+                        )
+                    else:
+                        self._charge_hold = CHARGING_FIRST_HOLD_SECONDS
+                    self._charging = True
+                    self._charge_rose_at = now
             elif delta <= -0.5:
                 self._charging = False
+                self._fell_from = self._prev_soc
+                self._fell_at = now
         self._prev_soc = percent
         discharging = (
             isinstance(storage_kw, (int, float))
@@ -368,10 +403,42 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if percent >= 99.5 or discharging or (
             self._charging
             and self._charge_rose_at is not None
-            and now - self._charge_rose_at > CHARGING_HOLD_SECONDS
+            and now - self._charge_rose_at > self._charge_hold
         ):
             self._charging = False
         return self._charging
+
+    def _warn_unknown_hardware(
+        self,
+        sku: str | None,
+        detected: tuple[int, float] | None,
+        batteries: list[dict[str, Any]],
+        model: tuple[int, float] | None,
+    ) -> None:
+        """Log once when Base reports battery hardware this version can't size.
+
+        Capacity then falls back to the saved option, which may be wrong.
+        The raw values stay on System Capacity's attributes.
+        """
+        unknown_sku = bool(sku) and detected is None and sku != "NO_BATTERY"
+        if detected is not None or not (unknown_sku or (batteries and model is None)):
+            return
+        described = ", ".join(
+            f"{b.get('generation') or b.get('generation_code')}"
+            f"/{b.get('variant') or b.get('variant_code')}"
+            for b in batteries
+        )
+        key = f"{sku}|{described}"
+        if key == self._warned_hardware:
+            return
+        self._warned_hardware = key
+        _LOGGER.warning(
+            "Base Power reports battery hardware this version doesn't know "
+            "(SKU %s, batteries %s). System Capacity uses the Battery Capacity "
+            "option. Please open an issue with your diagnostics so it can be added",
+            sku or "none",
+            described or "none",
+        )
 
     def _compose(self) -> dict[str, Any]:
         """Build coordinator data from the cached tiers and the latest grid."""
@@ -402,6 +469,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             units = DEFAULT_BATTERY_COUNT
             kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
             source = "default"
+        self._warn_unknown_hardware(sku, detected, location.get("batteries") or [], model)
         dashboard["battery_count"] = units
         dashboard["capacity_kwh"] = kwh
         dashboard["capacity_source"] = source

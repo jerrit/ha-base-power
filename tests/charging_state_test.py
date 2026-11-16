@@ -83,3 +83,35 @@ def test_a_missed_reading_is_unknown_and_does_not_invent_a_change(coordinator):
 def test_odd_storage_values_are_ignored(coordinator, storage):
     _polls(coordinator, [50.0, 51.0])
     assert coordinator._charging_state(51.0, storage) is True
+
+
+def test_one_rise_holds_for_an_hour_not_three(coordinator):
+    # A battery idling at its reserve that ticks up once does not stay "charging".
+    from custom_components.base_power.const import CHARGING_FIRST_HOLD_SECONDS
+
+    _polls(coordinator, [20.0, 21.0])
+    coordinator._monotonic.now += CHARGING_FIRST_HOLD_SECONDS - 60
+    assert coordinator._charging_state(21.0, 0.0) is True
+    coordinator._monotonic.now += 120
+    assert coordinator._charging_state(21.0, 0.0) is False
+
+
+def test_a_steady_slow_charge_stretches_the_hold(coordinator):
+    # One percent every 80 minutes: the hold follows the pace, so it stays on.
+    _polls(coordinator, [50.0, 51.0])
+    coordinator._monotonic.now += 80 * 60
+    assert coordinator._charging_state(52.0, 0.0) is True
+    states = _polls(coordinator, [52.0] * 79)
+    assert all(state is True for state in states)
+    coordinator._monotonic.now += CHARGING_HOLD_SECONDS
+    assert coordinator._charging_state(52.0, 0.0) is False
+
+
+def test_rounding_flicker_at_the_reserve_is_not_charging(coordinator):
+    states = _polls(coordinator, [21.0, 20.0, 21.0, 20.0, 21.0, 21.0])
+    assert all(state is False for state in states[1:])
+
+
+def test_a_rise_past_the_level_it_fell_from_is_charging(coordinator):
+    _polls(coordinator, [21.0, 20.0, 21.0])
+    assert _polls(coordinator, [22.0]) == [True]

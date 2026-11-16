@@ -6,7 +6,8 @@ to an outage. The coordinator refresh is the 15-minute usage tier: the v2
 daily overview, with RecentUsage and UsageEnergy only as fallbacks. It does
 not repeat the 60-second calls. Dashboard, Wi-Fi, billing, usage cycles,
 the billing cycle, the location, and the daily totals are the 6-hour tier.
-A 6-hour refresh with a failed call runs again after 15 minutes.
+A 6-hour refresh with a failed call runs again after 15 minutes. Each
+failure in a row doubles that wait, up to the normal 6 hours.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from .auth import AuthenticationError
 from .const import (
     DAILY_ENERGY_LOOKBACK_SECONDS,
     GRID_SCAN_INTERVAL_SECONDS,
+    SLOW_RETRY_MAX_SECONDS,
     SLOW_SCAN_INTERVAL_SECONDS,
     USAGE_SCAN_INTERVAL_SECONDS,
 )
@@ -94,6 +96,8 @@ class PollState:
         self.last_slow_at: float | None = None
         # True when a call in the last slow refresh failed
         self.slow_failed = False
+        # Slow refreshes in a row that failed or found no numeric id
+        self.slow_failures = 0
         self.dashboard: dict[str, Any] = {
             "service_location_id": None,
             "battery_status": 0,
@@ -123,16 +127,25 @@ class PollState:
         # Base's daily totals, oldest first. Used to repair the running totals.
         self.daily_energy: list[dict[str, Any]] = []
 
+    def slow_retry_seconds(self) -> float:
+        """Wait before retrying a failed slow refresh: 15 min, 30, 60, up to 6 h.
+
+        A call that keeps failing (an optional call Base never answers, say)
+        must not rerun the whole batch every 15 minutes forever.
+        """
+        doublings = max(self.slow_failures - 1, 0)
+        return min(USAGE_SCAN_INTERVAL_SECONDS * 2 ** min(doublings, 16), SLOW_RETRY_MAX_SECONDS)
+
     def slow_due(self, now: float, *, first: bool) -> bool:
         """Slow tier on startup, every 6 hours, or sooner after a failure.
 
-        A missing numeric id or a failed call retries on the usage interval,
-        not on every fast poll.
+        A missing numeric id or a failed call retries with backoff, never on
+        every fast poll.
         """
         if first or self.last_slow_at is None:
             return True
         retry = self.numeric_id is None or self.slow_failed
-        if retry and now - self.last_slow_at >= USAGE_SCAN_INTERVAL_SECONDS:
+        if retry and now - self.last_slow_at >= self.slow_retry_seconds():
             return True
         return now - self.last_slow_at >= SLOW_SCAN_INTERVAL_SECONDS
 
@@ -272,6 +285,15 @@ async def refresh_slow(
         state.daily_energy = days
 
     state.slow_failed = failed
+    if failed or state.numeric_id is None:
+        state.slow_failures += 1
+        _LOGGER.debug(
+            "Slow refresh incomplete (%d in a row); next try in %.0f min",
+            state.slow_failures,
+            state.slow_retry_seconds() / 60,
+        )
+    else:
+        state.slow_failures = 0
     state.mark_slow(now)
 
 

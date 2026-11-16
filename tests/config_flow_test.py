@@ -56,12 +56,13 @@ async def test_one_site_is_added_without_asking(hass):
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {"code": "123456"})
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Base Power (site-1)"
+    assert result["title"] == "Base Power (1 Main St, Austin)"
     assert result["data"] == {
         "email": "me@example.com",
         "client_token": "client-3",
         "session_id": "sess_new",
         "service_location_id": "site-1",
+        "site_label": "1 Main St, Austin",
     }
     assert result["result"].unique_id == "site-1"
     assert setup.call_count == 1
@@ -82,6 +83,7 @@ async def test_several_sites_show_a_picker(hass):
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"]["service_location_id"] == "site-2"
+    assert result["data"]["site_label"] == "2 Lake Rd, Dallas"
 
 
 async def test_a_site_already_set_up_is_skipped(hass):
@@ -142,6 +144,7 @@ async def test_reauth_updates_the_tokens_and_keeps_the_site(hass):
             "session_id": "old-session",
             "session_jwt": "stale",
             "service_location_id": "site-1",
+            "site_label": "1 Main St, Austin",
         },
     )
     entry.add_to_hass(hass)
@@ -156,6 +159,7 @@ async def test_reauth_updates_the_tokens_and_keeps_the_site(hass):
     assert entry.data["client_token"] == "client-3"
     assert entry.data["session_id"] == "sess_new"
     assert entry.data["service_location_id"] == "site-1"
+    assert entry.data["site_label"] == "1 Main St, Austin"
     assert "session_jwt" not in entry.data
 
 

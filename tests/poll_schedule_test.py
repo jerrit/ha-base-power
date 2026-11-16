@@ -422,3 +422,31 @@ def test_failed_first_refresh_stays_unknown_not_zero():
     _run(refresh_usage(NoTodayApi(_overview(), fail={"GetDailyOverview"}), state, "loc-1",
                        "America/Chicago", _at(0, 15)))
     assert state.energy["grid_to_home_kwh"] is None
+
+
+def test_a_call_that_keeps_failing_backs_off_to_the_normal_interval():
+    # GetLocation fails every time. The batch must not rerun every 15 minutes forever.
+    state = PollState()
+    api = RecordingApi(fail={"GetLocation"})
+    now = 0.0
+    waits = []
+    for _ in range(7):
+        _run(refresh_slow(api, state, "loc-1", None, now=now))
+        wait = USAGE_SCAN_INTERVAL_SECONDS
+        while not state.slow_due(now + wait, first=False):
+            wait += 60
+        waits.append(wait)
+        now += wait
+    minutes = [w / 60 for w in waits]
+    assert minutes == [15, 30, 60, 120, 240, 360, 360]
+
+
+def test_a_clean_slow_refresh_resets_the_backoff():
+    state = PollState()
+    _run(refresh_slow(RecordingApi(fail={"GetLocation"}), state, "loc-1", None, now=0))
+    _run(refresh_slow(RecordingApi(fail={"GetLocation"}), state, "loc-1", None, now=900))
+    assert state.slow_failures == 2
+    _run(refresh_slow(RecordingApi(), state, "loc-1", None, now=2700))
+    assert state.slow_failures == 0
+    assert not state.slow_due(2700 + USAGE_SCAN_INTERVAL_SECONDS, first=False)
+    assert state.slow_due(2700 + SLOW_SCAN_INTERVAL_SECONDS, first=False)

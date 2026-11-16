@@ -37,10 +37,11 @@ def _auth(hass, on_client_token=None) -> BasePowerAuth:
 
 @pytest.mark.parametrize(
     ("status", "rejected"),
-    [(400, True), (401, True), (403, True), (404, True), (422, True),
-     (408, False), (425, False), (429, False), (500, False), (502, False), (503, False)],
+    [(401, True), (404, True), (422, True),
+     (400, False), (403, False), (408, False), (425, False), (429, False),
+     (500, False), (502, False), (503, False)],
 )
-def test_only_a_client_error_means_sign_in_again(status, rejected):
+def test_only_a_lost_session_means_sign_in_again(status, rejected):
     assert is_auth_rejection(status) is rejected
 
 
@@ -54,14 +55,14 @@ async def test_refresh_returns_the_jwt_and_reuses_it(hass, aioclient_mock):
     assert aioclient_mock.call_count == 2
 
 
-@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("status", [403, 429, 500, 503])
 async def test_a_busy_or_broken_clerk_is_temporary(hass, aioclient_mock, status):
     aioclient_mock.post(TOKEN_URL, status=status, text="try later")
     with pytest.raises(AuthTemporaryError):
         await _auth(hass).async_ensure_valid_token()
 
 
-@pytest.mark.parametrize("status", [401, 403, 404])
+@pytest.mark.parametrize("status", [401, 404, 422])
 async def test_a_rejected_session_is_an_auth_error(hass, aioclient_mock, status):
     aioclient_mock.post(TOKEN_URL, status=status, text="no")
     with pytest.raises(AuthenticationError):
