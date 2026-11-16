@@ -82,6 +82,8 @@ Betas are off by default. Go to **Settings** → **Devices & services** → **Ma
 4. Check your email for a verification code and enter it
 5. Your account is configured automatically — no Service Location ID required
 
+The device is named after your site's street and city, for example "Base Power 1 Main St, Austin", so homes with more than one site can tell them apart. That name shows on dashboards and in screenshots. To hide your address, rename the device: **Settings** → **Devices & services** → **Base Power** → the device → the pencil icon. Renaming the device doesn't change entity IDs, so dashboards and automations keep working.
+
 ## Entities
 
 ### Sensors
@@ -90,7 +92,7 @@ Betas are off by default. Go to **Settings** → **Devices & services** → **Ma
 |--------|-------------|------|
 | Battery Level | State of charge from the live service context | % |
 | Battery Backup Time (Current Load) | Backup remaining if the house keeps drawing what it draws right now. Moves up and down with your load | hours |
-| Battery Count | Battery units, from the detected model or the chosen capacity | — |
+| Battery Count | Battery units, from the detected model or the chosen capacity. No long-term statistics since 1.14.0-beta.2 | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
 | System Capacity | Detected from the battery SKU, then the battery model, then the Battery Capacity option. Attributes show `capacity_source`, `hardware_sku`, and the raw `batteries` list | kWh |
 | Current Power | Live home load, or the latest 15-minute average kW when live load is missing | W |
@@ -206,7 +208,7 @@ Home Usage Today and Solar to Home fill from today's hourly samples. Battery to 
 - **Timeouts**: Every request to Base and to Clerk times out after 20 seconds. A 60-second poll is skipped while the one before it is still waiting
 - **Sign-in**: Only a session Clerk says is gone (401, 404, or 422) asks you to sign in again. A rate limit, bot-protection block (403), or server error is retried on the next refresh
 - **Grid voltage and outage**: `MobileGetGridStatus` and `MobileGetServiceContext`, called with the numeric service location id from the dashboard
-- **Service Location ID**: Found during setup through `ListLocations`, with `MobileGetAvailableLocations` as a fallback. Not entered by hand. The device is named after the site's street and city The address id and the numeric service location id are different values.
+- **Service Location ID**: Found during setup through `ListLocations`, with `MobileGetAvailableLocations` as a fallback. Not entered by hand. The device is named after the site's street and city. The address id and the numeric service location id are different values.
 
 ## Check this release before trusting it
 
@@ -248,7 +250,7 @@ A separate Shiner app API was not investigated.
 - Setup uses Home Assistant's HTTP session helper.
 - The Core capacity choices are 39.2 and 78.4 kWh, matching detection. Saved 40 and 80 kWh choices switch over automatically.
 - **Energy Cost Today** has a state class and resets at midnight, so it can be the cost entity in the Energy Dashboard.
-- **Battery Count** no longer records long-term statistics. Home Assistant may offer to delete the old ones.
+- **Battery Count** no longer records long-term statistics. Home Assistant shows a repair, "The entity no longer has a state class". Choosing delete is safe; see [Troubleshooting](#battery-count-says-the-entity-no-longer-has-a-state-class).
 
 ### v1.14.0-beta.1
 - Adds **Home Usage (Total)** and, on homes with solar, **Solar to Home (Total)**: running totals that never reset. The daily sensors miss each day's last hour because Base posts it after midnight. Use the new sensors in the Energy Dashboard.
@@ -409,6 +411,9 @@ A separate Shiner app API was not investigated.
 
 ### How often does this poll Base?
 About 132 calls an hour, all from your Home Assistant to Base's cloud. Battery level, power, and grid status every 60 seconds. Usage every 15 minutes. Billing and account details every 6 hours. Failed calls back off instead of retrying every minute. Base hasn't published a rate limit. The 60-second calls are what keep outage detection quick; the rest are spread out to keep the load low.
+
+### Battery Count says "The entity no longer has a state class"
+Expected after updating to 1.14.0-beta.2 or newer. Battery Count is a fixed number, so it no longer keeps long-term statistics. Choose to delete them in the repair. The sensor keeps working and its entity ID doesn't change.
 
 ### Reporting a problem
 - Go to **Settings** → **Devices & Services** → **Base Power**, open the three-dot menu, and choose **Download diagnostics**. Attach the file to your issue. Tokens, your email, site and account ids, and WiFi names are already removed.
