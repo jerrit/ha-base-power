@@ -254,7 +254,7 @@ After a restart the estimate needs a few minutes of readings, so System Capacity
 
 ## Changelog
 
-### Unreleased
+### v1.14.0-beta.3
 - **System Capacity** for batteries the integration doesn't know, such as `GEN3`, is estimated from Base's 750 W backup time (`capacity_source: estimated`). It's only used when it lands within 12% of a known size. The raw reading is always on `estimated_usable_kwh`. See [How capacity is worked out](#how-capacity-is-worked-out).
 - Base's nameplate size from the new `GetHome` call is used when Base sends it (`capacity_source: nameplate`), and the product name shows on System Capacity. One extra call every 6 hours.
 - **Battery Count** comes from the battery type (single, dual, or wall) when the model isn't mapped, so a `GEN3` dual counts as 2. A `source` attribute shows where it came from.
