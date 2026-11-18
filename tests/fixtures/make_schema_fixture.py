@@ -46,6 +46,11 @@ MESSAGES = [
         "UsageCycle",
         "MobileGetAvailableLocationsResponse",
         "MobileGetAvailableLocationsResponse.Location",
+        "GetHomeRequest",
+        "GetHomeResponse",
+        "HomeBattery",
+        "AssetProduct",
+        "BatterySystem",
     )
 ] + [
     V2 + name

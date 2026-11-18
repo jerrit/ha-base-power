@@ -105,6 +105,7 @@ class FakeApi(BasePowerApiClient):
         self.energy_account = {**api_v2.empty_energy_account(), "last_bill_amount_cents": 18853}
         self.billing_cycle = {**api_v2.empty_billing_cycle(), "net_accrued_cents": 500}
         self.daily_energy: list[dict[str, Any]] = []
+        self.home = {**api_v2.empty_home(), "available": True}
 
     async def _hit(self, name: str, value: Any) -> Any:
         self.calls.append(name)
@@ -142,6 +143,9 @@ class FakeApi(BasePowerApiClient):
 
     async def get_location(self, address):
         return await self._hit("get_location", dict(self.location))
+
+    async def get_home(self, address):
+        return await self._hit("get_home", dict(self.home))
 
     async def get_daily_energy(self, address, start, end):
         return await self._hit("get_daily_energy", list(self.daily_energy))

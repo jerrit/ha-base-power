@@ -103,6 +103,11 @@ class RecordingApi:
                                                "batteries": [{"generation": "GEN1",
                                                               "variant": "SINGLE"}]})
 
+    async def get_home(self, address):
+        return await self._hit("GetHome", {"available": True, "product_name": None,
+                                           "nameplate_capacity_kwh": None,
+                                           "nameplate_discharge_kw": None})
+
     async def get_daily_energy(self, address, start, end):
         return await self._hit(
             "GetDailyEnergy", [{"start": 86400, "home_kwh": 20.0, "solar_kwh": 0.0}]
@@ -118,7 +123,7 @@ def test_steady_state_is_under_135_calls_per_hour():
     assert fast == 120
     assert snapshot == 6
     assert usage == 4
-    assert abs(slow - 9 / 6) < 1e-9
+    assert abs(slow - 10 / 6) < 1e-9
     assert per_hour == fast + snapshot + usage + slow
     assert per_hour < 135
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.

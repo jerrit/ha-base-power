@@ -20,7 +20,7 @@ CLERK_JS_VERSION = "5"
 #     run only when the overview fails or lacks that data.
 #   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles
 #     + v2 CurrentBillingCycle + v2 battery GetAccount + v2 ListAccounts
-#     + v2 GetLocation + v2 GetDailyEnergy (about 1.5/hour). After a failed
+#     + v2 GetLocation + v2 GetDailyEnergy + GetHome (about 1.7/hour). After a failed
 #     call this tier runs again after 15 minutes, then 30, 60, and so on,
 #     up to 6 hours.
 # The v2 GetRecentGridVoltage runs only when GridStatus has no voltage.
@@ -88,6 +88,39 @@ def battery_model_capacity(batteries: list[dict[str, str | None]]) -> tuple[int,
         units += known[0]
         kwh += known[1]
     return units, round(kwh, 1)
+
+
+# Units per battery type. Holds for every generation: a single is one unit.
+BATTERY_VARIANT_UNITS: dict[str, int] = {"SINGLE": 1, "DUAL": 2, "WALL": 1}
+
+
+def battery_variant_count(batteries: list[dict[str, str | None]]) -> int | None:
+    """Units from the battery types alone. None if any type is unknown."""
+    if not batteries:
+        return None
+    units = [BATTERY_VARIANT_UNITS.get(battery.get("variant") or "") for battery in batteries]
+    if None in units:
+        return None
+    return sum(units)
+
+
+# Capacity estimate from Base's backup time, for hardware not in the tables
+# above. Base's 750 W backup estimate is usable energy ÷ 0.75 kW.
+ESTIMATE_LOAD_KW = 0.75
+# Usable share of the nameplate. Measured on one GRO_SINGLE: 22.5 of 25 kWh.
+ESTIMATE_USABLE_FRACTION = 0.9
+# Readings below this charge are skipped. A small error in a low percent
+# would scale up into a large error in size.
+ESTIMATE_MIN_SOC_PERCENT = 50
+# Median of the last hour of 60-second readings, once there are a few
+ESTIMATE_SAMPLES = 60
+ESTIMATE_MIN_SAMPLES = 3
+# The estimate is used only within this share of a known size. Known sizes
+# are at least 20% apart, so a reading outside this is not trusted.
+ESTIMATE_SNAP_TOLERANCE = 0.12
+# Base's own nameplate (GetHome) must be this close to a known size to
+# borrow that size's unit count.
+NAMEPLATE_MATCH_TOLERANCE = 0.03
 
 
 # Legacy fallback for installs that still store an integer unit count.

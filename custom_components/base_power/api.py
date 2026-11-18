@@ -662,6 +662,15 @@ class BasePowerApiClient:
         )
         return api_v2.parse_battery_account(data)
 
+    async def get_home(self, address_id: str) -> dict[str, Any]:
+        """Battery product and nameplate size, when Base sends them."""
+        from . import api_v2
+
+        data = await self._call(
+            "GetHome", api_v2.encode_address_request(address_id), optional=True
+        )
+        return api_v2.parse_home(data)
+
     async def get_energy_account(self, address_id: str) -> dict[str, Any]:
         """Bill due date and balance for the energy account, from ListAccounts."""
         from . import api_v2

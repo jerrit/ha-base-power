@@ -274,6 +274,9 @@ SENSORS: tuple[BasePowerSensorDescription, ...] = (
         name="Battery Count",
         icon="mdi:battery-multiple",
         value_fn=_derived("battery_count"),
+        attributes_fn=lambda data: _present(
+            source=_section(data, "dashboard").get("battery_count_source") or None
+        ),
     ),
     BasePowerSensorDescription(
         key="capacity",
@@ -289,6 +292,10 @@ SENSORS: tuple[BasePowerSensorDescription, ...] = (
                 "capacity_source",
                 "detected_capacity_kwh",
                 "model_capacity_kwh",
+                "nameplate_capacity_kwh",
+                "estimated_usable_kwh",
+                "estimated_capacity_kwh",
+                "product_name",
                 "hardware_sku",
                 "batteries",
             )

@@ -549,6 +549,49 @@ def parse_battery_account(data: bytes) -> dict[str, Any]:
     return result
 
 
+def empty_home() -> dict[str, Any]:
+    # All None, so a failed or empty reply keeps the last good one
+    return {
+        "available": None,
+        "product_name": None,
+        "nameplate_capacity_kwh": None,
+        "nameplate_discharge_kw": None,
+    }
+
+
+def parse_home(data: bytes) -> dict[str, Any]:
+    """Parse DashboardAPI GetHomeResponse. Reads only the battery product.
+
+    battery (3) → product (8, AssetProduct) → external_display_name (1),
+    battery_system (9) → nameplate_energy_capacity_wh (1, double),
+    nameplate_discharge_power_w (2, double). Not every account gets a
+    product. Fees and install details are skipped.
+    """
+    result = empty_home()
+    battery = next((v for f, k, v in _iter_fields(data) if f == 3 and k == "bytes"), None)
+    if battery is None:
+        return result
+    result["available"] = True
+    product = next((v for f, k, v in _iter_fields(battery) if f == 8 and k == "bytes"), None)
+    if product is None:
+        return result
+    for field_num, kind, value in _iter_fields(product):
+        if field_num == 1 and kind == "bytes":
+            result["product_name"] = value.decode("utf-8", errors="replace").strip() or None
+        elif field_num == 9 and kind == "bytes":
+            for sub_num, sub_kind, number in _iter_fields(value):
+                if sub_kind != "double" or not math.isfinite(number) or number <= 0:
+                    continue
+                if sub_num == 1:
+                    result["nameplate_capacity_kwh"] = round(number / 1000, 2)
+                elif sub_num == 2:
+                    result["nameplate_discharge_kw"] = round(number / 1000, 2)
+    _LOGGER.debug(
+        "Home product=%s nameplate=%s kWh", result["product_name"], result["nameplate_capacity_kwh"]
+    )
+    return result
+
+
 def empty_energy_account() -> dict[str, Any]:
     return {
         "due_at": None,

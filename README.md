@@ -21,13 +21,13 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 | Base Core | `BASE1_SINGLE` | 39.2 kWh | Not confirmed yet |
 | Dual Base Core | `BASE1_DUAL` | 78.4 kWh | Not confirmed yet |
 
-"Not confirmed yet" means the SKU and size come from Base's checkout, but no owner has sent a report. Live readings (battery level, power, grid) should work on any Base battery. If yours isn't confirmed, or Home Assistant logs a warning about unknown battery hardware, please open an issue with your [diagnostics file](#reporting-a-problem). Core owners especially: Base reports some batteries as `GEN3`, which is probably Core but isn't mapped yet.
+"Not confirmed yet" means the SKU and size come from Base's checkout, but no owner has sent a report. Live readings (battery level, power, grid) should work on any Base battery. If yours isn't confirmed, or Home Assistant logs a warning about unknown battery hardware, please open an issue with your [diagnostics file](#reporting-a-problem). Core owners especially: Base reports some batteries as `GEN3`, which is probably Core but isn't mapped yet. Until it is, the integration estimates the size from Base's backup time (see [How capacity is worked out](#how-capacity-is-worked-out)), and your diagnostics file shows whether the estimate is right.
 
 ## Features
 
 - **Battery Level** — State of charge from `stateOfEnergyRaw`, updated about once a minute
 - **Backup Time (Current Load)** — Hours of backup if the house keeps using power at its current rate
-- **System Capacity** — detected from your battery model: Wall 20 kWh, original 25 or 50 kWh, Base Core 39.2 or 78.4 kWh. If Base doesn't report a known model, the capacity chosen in the integration options is used
+- **System Capacity** — detected from your battery model: Wall 20 kWh, original 25 or 50 kWh, Base Core 39.2 or 78.4 kWh. If Base doesn't report a known model, it's estimated from Base's backup time, and the capacity chosen in the integration options is the last fallback
 - **Current Power** — Live home load in watts when the service context includes it
 - **Grid Power** — On when grid voltage is at least 100 V and Base has not flagged an outage. Off during an outage, when voltage falls below 50 V, or when the battery reports an off-grid state. Unknown when that telemetry is missing
 - **Battery State** — The battery's mode from Base's newer API: on grid, outage, no home power, overcurrent, overcurrent standby, or telemetry unavailable
@@ -92,9 +92,9 @@ The device is named after your site's street and city, for example "Base Power 1
 |--------|-------------|------|
 | Battery Level | State of charge from the live service context | % |
 | Battery Backup Time (Current Load) | Backup remaining if the house keeps drawing what it draws right now. Moves up and down with your load | hours |
-| Battery Count | Battery units, from the detected model or the chosen capacity. No long-term statistics since 1.14.0-beta.2 | — |
+| Battery Count | Battery units, from the detected model, otherwise from the battery type Base reports (single, dual, or wall), otherwise the chosen capacity. `source` shows which. No long-term statistics since 1.14.0-beta.2 | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
-| System Capacity | Detected from the battery SKU, then the battery model, then the Battery Capacity option. Attributes show `capacity_source`, `hardware_sku`, and the raw `batteries` list | kWh |
+| System Capacity | Detected from the battery SKU, then the battery model, then Base's nameplate, then an estimate from Base's backup time, then the Battery Capacity option. See [How capacity is worked out](#how-capacity-is-worked-out). Attributes show `capacity_source`, `estimated_usable_kwh`, `estimated_capacity_kwh`, `nameplate_capacity_kwh`, `hardware_sku`, and the raw `batteries` list | kWh |
 | Current Power | Live home load, or the latest 15-minute average kW when live load is missing | W |
 | Current Interval Energy | Energy for the current 15-min period (average kW ÷ 4) | kWh |
 | Daily Peak | Highest 15-min interval today | kWh |
@@ -198,9 +198,9 @@ Home Usage Today and Solar to Home fill from today's hourly samples. Battery to 
 
 - **Protocol**: gRPC-Web over HTTPS (not standard gRPC)
 - **Authentication**: Clerk (email OTP → JWT with 60-second lifetime, native mobile API pattern)
-- **Polling**: Service context and grid status every 60 seconds. The battery snapshot every 10 minutes, and every 60 seconds while the outage flag, voltage, or the last snapshot points to an outage. The daily overview every 15 minutes. Dashboard, Wi-Fi, billing, usage cycles, the billing cycle, the account list, the location, and the daily totals every 6 hours, and again on startup. When one of those fails, or the numeric location id is missing, the 6-hour batch retries after 15 minutes, then 30, 60, and so on, up to 6 hours. About 132 calls an hour
+- **Polling**: Service context and grid status every 60 seconds. The battery snapshot every 10 minutes, and every 60 seconds while the outage flag, voltage, or the last snapshot points to an outage. The daily overview every 15 minutes. Dashboard, Wi-Fi, billing, usage cycles, the billing cycle, the account list, the location, the daily totals, and the home's battery product every 6 hours, and again on startup. When one of those fails, or the numeric location id is missing, the 6-hour batch retries after 15 minutes, then 30, 60, and so on, up to 6 hours. About 132 calls an hour
 - **Fallbacks**: 15-minute usage and today's energy come from the newer daily overview. The older recent-usage and usage-energy calls run only when the overview fails or lacks that data. Grid voltage comes from the older grid status call, and the newer voltage call fills in when it fails or returns nothing. Intervals Today shows `usage_source` and `energy_source`, and Grid Power shows `voltage_source` (`overview`, `legacy`, or `v2`)
-- **Battery**: detected from the SKU or battery model. When neither is known, the Battery Capacity option is used: 20, 25, 39.2, 50, or 78.4 kWh
+- **Battery**: detected from the SKU or battery model. When neither is known, Base's nameplate from `GetHome` is used if Base sends it, then an estimate from the 750 W backup time, then the Battery Capacity option: 20, 25, 39.2, 50, or 78.4 kWh
 - **Battery %**: `stateOfEnergyRaw` from `MobileGetServiceContext`
 - **Backup Time**: `availableBackup` hours from `MobileGetServiceContext`, at the current home load, and `availableBackupAt750W` at 750 W
 - **WiFi**: `gatewayWifi` from `MobileGetServiceContext` names the network the battery is on. The signal comes from `MobileGetWifiMetrics`
@@ -234,11 +234,31 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **WiFi SSID.** Should match the network shown in the Base app without choosing anything. `source` should read `base`.
 - **Next Service Visit.** Not seen with a value yet. If Base has a visit scheduled for you, check that the time matches the app.
 - **Solar Export Today.** Not tested on a solar home yet.
-- **Capacity.** Detected from the battery SKU, then from the battery model. The Battery Capacity setting (20, 25, 39.2, 50, or 78.4 kWh) is used when neither is known. `capacity_source` shows which one is in use (`sku`, `model`, `option`, or `default`).
+- **Capacity.** Detected from the battery SKU, then from the battery model, then Base's nameplate, then the backup-time estimate. The Battery Capacity setting (20, 25, 39.2, 50, or 78.4 kWh) is used when none of those work. `capacity_source` shows which one is in use (`sku`, `model`, `nameplate`, `estimated`, `option`, or `default`). On any battery, `estimated_capacity_kwh` should match your real size once the battery has been at 50% or more for a few minutes. If it doesn't, please send diagnostics.
 
 A separate Shiner app API was not investigated.
 
+## How capacity is worked out
+
+The integration uses the first of these that works:
+
+1. **Battery SKU** from your Base account, such as `GRO_SINGLE`.
+2. **Battery model** Base reports for the site. Only `GEN1` is mapped so far.
+3. **Nameplate size** from Base's `GetHome` call, when Base includes the product. Not every account gets it.
+4. **Estimate from backup time.** Base's "backup at 750 W" figure is the usable energy left divided by 0.75 kW. Divided by the charge level, that gives the battery's usable size. On a 25 kWh Single Battery that's 22.5 kWh, so Base treats about 90% as usable. The integration takes the median of the last hour of readings at 50% charge or higher, divides by 0.9, and uses the nearest known size, but only if it's within 12% of one. The battery type (single, dual, wall) narrows the choice to sizes with that many units.
+5. **Battery Capacity option** you chose in the settings.
+
+The estimate ranks above the option because the settings form pre-fills 25 kWh, so many installs never chose it. A reading that isn't close to any known size is shown in `estimated_usable_kwh` but not used. The 90% figure comes from one battery so far. If a Core keeps a different reserve, the estimate won't be close to a known size, and capacity falls back to your option rather than a wrong size.
+
+After a restart the estimate needs a few minutes of readings, so System Capacity can show the option briefly first.
+
 ## Changelog
+
+### Unreleased
+- **System Capacity** for batteries the integration doesn't know, such as `GEN3`, is estimated from Base's 750 W backup time (`capacity_source: estimated`). It's only used when it lands within 12% of a known size. The raw reading is always on `estimated_usable_kwh`. See [How capacity is worked out](#how-capacity-is-worked-out).
+- Base's nameplate size from the new `GetHome` call is used when Base sends it (`capacity_source: nameplate`), and the product name shows on System Capacity. One extra call every 6 hours.
+- **Battery Count** comes from the battery type (single, dual, or wall) when the model isn't mapped, so a `GEN3` dual counts as 2. A `source` attribute shows where it came from.
+- Diagnostics include a `capacity_estimate` summary.
 
 ### v1.14.0-beta.2
 - The Energy Dashboard section no longer pairs Home Usage (Total) with Solar to Home (Total), which counted solar twice. Homes with solar get a grid import template instead. The Battery discharge row is gone.

@@ -23,6 +23,7 @@ from .api_v2 import (
     live_grid_support,
 )
 from .auth import AuthenticationError, BasePowerAuth
+from .capacity import CapacityEstimate, nearest_system
 from .const import (
     BATTERY_CAPACITY_PER_UNIT_KWH,
     CHARGING_BOUNCE_SECONDS,
@@ -34,10 +35,12 @@ from .const import (
     CONTEXT_HOLD_SECONDS,
     DEFAULT_BATTERY_COUNT,
     HARDWARE_SKU_CAPACITY,
+    NAMEPLATE_MATCH_TOLERANCE,
     SCAN_INTERVAL_SECONDS,
     STORAGE_VERSION,
     USAGE_STALE_AFTER_FAILURES,
     battery_model_capacity,
+    battery_variant_count,
     resolve_battery_capacity,
     totals_store_key,
 )
@@ -52,6 +55,11 @@ from .poll import (
 from .totals import EnergyTotals
 
 _LOGGER = logging.getLogger(__name__)
+
+_SOURCE_TEXT = {
+    "nameplate": "the size Base reports for the product",
+    "estimated": "an estimate from Base's backup time",
+}
 
 
 class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -104,6 +112,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._polls_since_snapshot = 0
         self._totals = EnergyTotals()
         self._totals_store: Store | None = None
+        self._capacity_estimate = CapacityEstimate()
 
     async def async_load_totals(self) -> None:
         """Load the running energy totals saved before the last restart."""
@@ -176,6 +185,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._update_totals()
             if include_fast_on_coordinator_refresh(first):
                 self._grid = await self._async_fetch_grid(self._poll.numeric_id)
+                self._sample_capacity()
                 self._snapshot = await self._async_fetch_snapshot()
             return self._compose()
         except AuthenticationError as err:
@@ -268,6 +278,12 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         grid = self.api.combine_grid_telemetry(context, voltage)
         grid["voltage_source"] = source
         return grid
+
+    def _sample_capacity(self) -> None:
+        """Add the latest charge and 750 W backup time to the size estimate."""
+        self._capacity_estimate.add(
+            self._grid.get("battery_soc_percent"), self._grid.get("backup_hours_750w")
+        )
 
     def _hold_context(self, context: dict[str, Any]) -> dict[str, Any]:
         """Return the last good context when this one missed and is recent.
@@ -414,11 +430,14 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         detected: tuple[int, float] | None,
         batteries: list[dict[str, Any]],
         model: tuple[int, float] | None,
+        source: str,
     ) -> None:
         """Log once when Base reports battery hardware this version can't size.
 
-        Capacity then falls back to the saved option, which may be wrong.
-        The raw values stay on System Capacity's attributes.
+        Capacity then comes from Base's nameplate, the backup-time estimate,
+        or the saved option. The raw values stay on System Capacity's
+        attributes. The source is part of the key, so the log shows again
+        when it changes.
         """
         unknown_sku = bool(sku) and detected is None and sku != "NO_BATTERY"
         if detected is not None or not (unknown_sku or (batteries and model is None)):
@@ -428,54 +447,86 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"/{b.get('variant') or b.get('variant_code')}"
             for b in batteries
         )
-        key = f"{sku}|{described}"
+        key = f"{sku}|{described}|{source}"
         if key == self._warned_hardware:
             return
         self._warned_hardware = key
         _LOGGER.warning(
             "Base Power reports battery hardware this version doesn't know "
-            "(SKU %s, batteries %s). System Capacity uses the Battery Capacity "
-            "option. Please open an issue with your diagnostics so it can be added",
+            "(SKU %s, batteries %s). System Capacity uses %s. Please open an "
+            "issue with your diagnostics so it can be added",
             sku or "none",
             described or "none",
+            _SOURCE_TEXT.get(source, "the Battery Capacity option"),
         )
+
+    def _resolve_capacity(self, batteries: list[dict[str, Any]]) -> dict[str, Any]:
+        """Battery count and size, from the most reliable source available.
+
+        Size: a known SKU, then a known battery model, then Base's nameplate
+        from GetHome, then the estimate from Base's backup time, then the
+        saved option. The settings form pre-fills 25 kWh, so a saved value
+        may never have been chosen on purpose, which is why the estimate
+        ranks above it.
+
+        Count: from the SKU or model when known, otherwise from the battery
+        types, which give the unit count for any generation.
+        """
+        options = self._config_entry.options
+        sku = (self._poll.battery_account or {}).get("hardware_sku")
+        detected = HARDWARE_SKU_CAPACITY.get(sku) if sku else None
+        model = battery_model_capacity(batteries)
+        type_units = battery_variant_count(batteries)
+        home = getattr(self._poll, "home", None) or {}
+        nameplate = home.get("nameplate_capacity_kwh")
+        estimate = self._capacity_estimate.system(type_units)
+
+        if detected is not None:
+            (units, kwh), source = detected, "sku"
+        elif model is not None:
+            (units, kwh), source = model, "model"
+        elif nameplate:
+            # The unit count comes from the matching known size, if any.
+            known = nearest_system(nameplate, tolerance=NAMEPLATE_MATCH_TOLERANCE)
+            units = known[0] if known else DEFAULT_BATTERY_COUNT
+            kwh, source = nameplate, "nameplate"
+        elif estimate is not None:
+            (units, kwh), source = estimate, "estimated"
+        else:
+            resolved = resolve_battery_capacity(options.get(CONF_BATTERY_CAPACITY))
+            if resolved is not None:
+                (units, kwh), source = resolved, "option"
+            elif CONF_BATTERY_COUNT in options:
+                units = options[CONF_BATTERY_COUNT]
+                kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
+                source = "option"
+            else:
+                units = DEFAULT_BATTERY_COUNT
+                kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
+                source = "default"
+        count_source = source
+        if source not in ("sku", "model") and type_units is not None:
+            units, count_source = type_units, "battery_type"
+        self._warn_unknown_hardware(sku, detected, batteries, model, source)
+        return {
+            "battery_count": units,
+            "battery_count_source": count_source,
+            "capacity_kwh": kwh,
+            "capacity_source": source,
+            "hardware_sku": sku,
+            "detected_capacity_kwh": detected[1] if detected else None,
+            "model_capacity_kwh": model[1] if model else None,
+            "nameplate_capacity_kwh": nameplate,
+            "product_name": home.get("product_name"),
+            "estimated_usable_kwh": self._capacity_estimate.usable_kwh,
+            "estimated_capacity_kwh": estimate[1] if estimate else None,
+        }
 
     def _compose(self) -> dict[str, Any]:
         """Build coordinator data from the cached tiers and the latest grid."""
         dashboard = dict(self._poll.dashboard)
-        options = self._config_entry.options
-        resolved = resolve_battery_capacity(options.get(CONF_BATTERY_CAPACITY))
-        sku = (self._poll.battery_account or {}).get("hardware_sku")
-        detected = HARDWARE_SKU_CAPACITY.get(sku) if sku else None
         location = self._poll.location or {}
-        model = battery_model_capacity(location.get("batteries") or [])
-        # A known SKU wins, then the battery model from the site's location.
-        # The settings form pre-fills a capacity, so a saved value may never
-        # have been chosen on purpose. The saved option covers the rest.
-        if detected is not None:
-            units, kwh = detected
-            source = "sku"
-        elif model is not None:
-            units, kwh = model
-            source = "model"
-        elif resolved is not None:
-            units, kwh = resolved
-            source = "option"
-        elif CONF_BATTERY_COUNT in options:
-            units = options[CONF_BATTERY_COUNT]
-            kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
-            source = "option"
-        else:
-            units = DEFAULT_BATTERY_COUNT
-            kwh = units * BATTERY_CAPACITY_PER_UNIT_KWH
-            source = "default"
-        self._warn_unknown_hardware(sku, detected, location.get("batteries") or [], model)
-        dashboard["battery_count"] = units
-        dashboard["capacity_kwh"] = kwh
-        dashboard["capacity_source"] = source
-        dashboard["hardware_sku"] = sku
-        dashboard["detected_capacity_kwh"] = detected[1] if detected else None
-        dashboard["model_capacity_kwh"] = model[1] if model else None
+        dashboard.update(self._resolve_capacity(location.get("batteries") or []))
         dashboard["batteries"] = location.get("batteries") or []
         dashboard["upcoming_service_at"] = (
             location.get("upcoming_service_at") or dashboard.get("upcoming_service_at")
@@ -572,6 +623,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_account": self._poll.battery_account,
             "energy_account": self._poll.energy_account,
             "location": location,
+            "home": getattr(self._poll, "home", None) or {},
             "sources": {
                 "usage": self._poll.usage_source,
                 "energy": self._poll.energy_source,
@@ -601,6 +653,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # An empty grid poll stays unknown. Do not keep the previous
             # "grid is up" reading across a miss.
             self._grid = await self._async_fetch_grid(self._poll.numeric_id)
+            self._sample_capacity()
             self._polls_since_snapshot += 1
             if self._snapshot_due():
                 self._snapshot = await self._async_fetch_snapshot()

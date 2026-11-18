@@ -89,6 +89,14 @@ READ_FIELDS = [
     (LEGACY + "UsageCycle", 3, "servicePeriodEnd"),
     (LEGACY + "MobileGetAvailableLocationsResponse", 1, "locations"),
     (LEGACY + "MobileGetAvailableLocationsResponse.Location", 1, "addressId"),
+    # api_v2.parse_home: DashboardAPI GetHome
+    (LEGACY + "GetHomeRequest", 1, "address_id"),
+    (LEGACY + "GetHomeResponse", 3, "battery"),
+    (LEGACY + "HomeBattery", 8, "product"),
+    (LEGACY + "AssetProduct", 1, "external_display_name"),
+    (LEGACY + "AssetProduct", 9, "battery_system"),
+    (LEGACY + "BatterySystem", 1, "nameplate_energy_capacity_wh"),
+    (LEGACY + "BatterySystem", 2, "nameplate_discharge_power_w"),
     # api_v2.py: dashboard.mobile.v2
     (V2 + "GetBatterySnapshotRequest", 1, "address_id"),
     (V2 + "GetBatterySnapshotResponse", 1, "snapshot"),

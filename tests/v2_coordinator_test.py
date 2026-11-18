@@ -67,6 +67,7 @@ def _compose(
             coordinator._poll = poll.PollState()
             coordinator._totals = coordinator_mod.EnergyTotals()
             coordinator._totals_store = None
+            coordinator._capacity_estimate = coordinator_mod.CapacityEstimate()
             coordinator._poll.energy = {
                 "grid_to_home_kwh": energy_grid,
                 "solar_to_home_kwh": energy_solar,
@@ -232,6 +233,7 @@ async def _coordinator(hass):
     coordinator._poll = poll.PollState()
     coordinator._totals = coordinator_mod.EnergyTotals()
     coordinator._totals_store = None
+    coordinator._capacity_estimate = coordinator_mod.CapacityEstimate()
     coordinator._poll.numeric_id = 7
     coordinator._poll.mark_slow(coordinator._monotonic())
     coordinator._grid = _grid(api, volts=245.0)
@@ -395,7 +397,7 @@ def test_grid_power_data_records_the_battery_state_behind_an_off_state():
     assert _compose("on_grid")["grid"]["battery_state"] == "on_grid"
 
 
-def _capacity(options, sku, batteries=None, hours=None):
+def _capacity(options, sku, batteries=None, hours=None, readings=(), home=None):
     coordinator_mod, api, v2, poll = _modules()
 
     async def run():
@@ -409,6 +411,11 @@ def _capacity(options, sku, batteries=None, hours=None):
             coordinator._poll = poll.PollState()
             coordinator._totals = coordinator_mod.EnergyTotals()
             coordinator._totals_store = None
+            coordinator._capacity_estimate = coordinator_mod.CapacityEstimate()
+            for soc, hours_750w in readings:
+                coordinator._capacity_estimate.add(soc, hours_750w)
+            if home is not None:
+                coordinator._poll.home = dict(v2.empty_home(), available=True, **home)
             coordinator._poll.battery_account = {"plan_name": None, "hardware_sku": sku,
                                                  "equipment_description": None}
             if batteries is not None:
@@ -557,15 +564,15 @@ def test_unknown_hardware_logs_one_warning(caplog):
     gen3 = [{"generation": "GEN3", "variant": "SINGLE", "generation_code": 2, "variant_code": 1}]
     with caplog.at_level("WARNING"):
         for _ in range(3):
-            coordinator._warn_unknown_hardware(None, None, gen3, None)
-        coordinator._warn_unknown_hardware("GRO_SINGLE", (1, 25), gen3, None)
-        coordinator._warn_unknown_hardware(None, None, [], None)
-        coordinator._warn_unknown_hardware("NO_BATTERY", None, [], None)
+            coordinator._warn_unknown_hardware(None, None, gen3, None, "option")
+        coordinator._warn_unknown_hardware("GRO_SINGLE", (1, 25), gen3, None, "option")
+        coordinator._warn_unknown_hardware(None, None, [], None, "option")
+        coordinator._warn_unknown_hardware("NO_BATTERY", None, [], None, "option")
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1
     assert "GEN3/SINGLE" in warnings[0].getMessage()
     with caplog.at_level("WARNING"):
-        coordinator._warn_unknown_hardware("BASE2_SINGLE", None, [], None)
+        coordinator._warn_unknown_hardware("BASE2_SINGLE", None, [], None, "option")
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
 
 
@@ -584,3 +591,73 @@ def test_device_model_uses_the_sku_then_the_battery_model():
     assert device_model({"dashboard": {"hardware_sku": None, "batteries": batteries}}) == "GEN1 SINGLE"
     assert device_model({"dashboard": {"hardware_sku": "NO_BATTERY"}}) == DEFAULT_MODEL
     assert device_model(None) == DEFAULT_MODEL
+
+
+# --- capacity for hardware the tables don't know -----------------------------------
+
+# A GEN3 single at full charge, as Base would report a Core: 35.28 kWh usable
+_CORE_READINGS = [(100, 47.04)] * 3
+
+
+def test_estimate_sizes_an_unknown_battery_over_the_prefilled_option():
+    gen3 = _models(("GEN3", "SINGLE"))
+    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, None, gen3, readings=_CORE_READINGS)
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (39.2, 1, "estimated")
+    assert dashboard["estimated_usable_kwh"] == 35.28
+    assert dashboard["estimated_capacity_kwh"] == 39.2
+    assert dashboard["battery_count_source"] == "battery_type"
+
+
+def test_estimate_never_overrides_a_known_sku_or_model():
+    dashboard, kwh = _capacity({}, "GRO_SINGLE", readings=_CORE_READINGS)
+    assert (kwh, dashboard["capacity_source"], dashboard["estimated_capacity_kwh"]) == (25, "sku", 39.2)
+    dashboard, kwh = _capacity({}, None, _models(("GEN1", "SINGLE")), readings=_CORE_READINGS)
+    assert (kwh, dashboard["capacity_source"]) == (25, "model")
+
+
+def test_an_estimate_far_from_any_size_falls_back_to_the_option():
+    # 30 kWh nameplate is 20% from 25 and 23% from 39.2, so it is not trusted.
+    readings = [(100, 36.0)] * 3
+    dashboard, kwh = _capacity({"battery_capacity": "39.2 kWh (1 Core)"}, None,
+                               _models(("GEN3", "SINGLE")), readings=readings)
+    assert (kwh, dashboard["capacity_source"]) == (39.2, "option")
+    assert dashboard["estimated_usable_kwh"] == 27.0
+    assert dashboard["estimated_capacity_kwh"] is None
+
+
+def test_battery_type_sets_the_count_when_the_model_is_unknown():
+    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, None, _models(("GEN3", "DUAL")))
+    assert (kwh, dashboard["battery_count"], dashboard["battery_count_source"]) == (25, 2, "battery_type")
+    # Two units rule out the one-unit sizes, so a Core-sized reading is not used.
+    dashboard, _ = _capacity({}, None, _models(("GEN3", "DUAL")), readings=_CORE_READINGS)
+    assert dashboard["capacity_source"] == "default"
+    # A dual Core reads twice that.
+    dashboard, kwh = _capacity({}, None, _models(("GEN3", "DUAL")), readings=[(100, 94.08)] * 3)
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (78.4, 2, "estimated")
+
+
+def test_base_nameplate_wins_over_the_estimate():
+    home = {"product_name": "Base Core", "nameplate_capacity_kwh": 39.2}
+    dashboard, kwh = _capacity({}, None, [], readings=[(100, 30.0)] * 3, home=home)
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (39.2, 1, "nameplate")
+    assert dashboard["battery_count_source"] == "nameplate"
+    assert dashboard["product_name"] == "Base Core"
+    dashboard, kwh = _capacity({}, None, [], home={"nameplate_capacity_kwh": 78.4})
+    assert (kwh, dashboard["battery_count"]) == (78.4, 2)
+    # A known SKU still wins.
+    dashboard, kwh = _capacity({}, "GRO_SINGLE", home=home)
+    assert (kwh, dashboard["capacity_source"], dashboard["nameplate_capacity_kwh"]) == (25, "sku", 39.2)
+
+
+def test_unknown_hardware_warning_names_the_source(caplog):
+    coordinator_mod = _modules()[0]
+    coordinator = coordinator_mod.BasePowerCoordinator.__new__(coordinator_mod.BasePowerCoordinator)
+    gen3 = [{"generation": "GEN3", "variant": "SINGLE"}]
+    with caplog.at_level("WARNING"):
+        coordinator._warn_unknown_hardware(None, None, gen3, None, "estimated")
+        coordinator._warn_unknown_hardware(None, None, gen3, None, "estimated")
+        coordinator._warn_unknown_hardware(None, None, gen3, None, "option")
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(messages) == 2
+    assert "estimate from Base's backup time" in messages[0]
+    assert "Battery Capacity option" in messages[1]

@@ -5,7 +5,8 @@ runs every 10 minutes, and on every 60-second poll while something points
 to an outage. The coordinator refresh is the 15-minute usage tier: the v2
 daily overview, with RecentUsage and UsageEnergy only as fallbacks. It does
 not repeat the 60-second calls. Dashboard, Wi-Fi, billing, usage cycles,
-the billing cycle, the location, and the daily totals are the 6-hour tier.
+the billing cycle, the location, the daily totals, and the home's battery
+product are the 6-hour tier.
 A 6-hour refresh with a failed call runs again after 15 minutes. Each
 failure in a row doubles that wait, up to the normal 6 hours.
 """
@@ -23,6 +24,7 @@ from .api_v2 import (
     empty_battery_account,
     empty_billing_cycle,
     empty_energy_account,
+    empty_home,
     empty_location,
     empty_overview,
 )
@@ -54,6 +56,7 @@ SLOW_METHODS = (
     "ListAccounts",
     "GetLocation",
     "GetDailyEnergy",
+    "GetHome",
 )
 
 
@@ -124,6 +127,8 @@ class PollState:
         self.battery_account: dict[str, Any] = empty_battery_account()
         self.energy_account: dict[str, Any] = empty_energy_account()
         self.location: dict[str, Any] = empty_location()
+        # Battery product and nameplate from GetHome, when Base sends them
+        self.home: dict[str, Any] = empty_home()
         # Base's daily totals, oldest first. Used to repair the running totals.
         self.daily_energy: list[dict[str, Any]] = []
 
@@ -263,6 +268,7 @@ async def refresh_slow(
         ("CurrentBillingCycle", "billing_cycle", lambda: api.get_current_billing_cycle(address_id)),
         ("Battery account", "battery_account", lambda: api.get_battery_account(address_id)),
         ("Energy account", "energy_account", lambda: api.get_energy_account(address_id)),
+        ("Home", "home", lambda: api.get_home(address_id)),
     )
     for name, attribute, call in kept_pieces:
         fetched = await fetch(name, call)

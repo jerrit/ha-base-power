@@ -290,6 +290,16 @@ async def test_v2_calls_use_their_service_and_survive_an_empty_reply(
     assert result[empty] is None
 
 
+async def test_get_home_uses_the_dashboard_api(hass, aioclient_mock):
+    aioclient_mock.post("https://dashboard.baseapis.net/dashboard.DashboardAPI/GetHome", content=_grpc())
+    client = BasePowerApiClient(async_get_clientsession(hass))
+    client.set_jwt("jwt")
+    result = await client.get_home("loc-1")
+    assert aioclient_mock.call_count == 1
+    assert aioclient_mock.mock_calls[0][2] == _frame(0, b"\x0a\x05loc-1")
+    assert result["nameplate_capacity_kwh"] is None
+
+
 async def test_daily_energy_call(hass, aioclient_mock):
     aioclient_mock.post(f"{V2}.UsageService/GetDailyEnergy", content=_grpc())
     client = BasePowerApiClient(async_get_clientsession(hass))
