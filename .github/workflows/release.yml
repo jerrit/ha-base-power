@@ -28,7 +28,7 @@ jobs:
           fi
       - name: Check release notes exist
         run: |
-          notes="RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          notes="release-notes/${GITHUB_REF_NAME}.md"
           if [ ! -f "${notes}" ]; then
             echo "::error::Missing ${notes}"
             exit 1
@@ -44,4 +44,4 @@ jobs:
           fi
           flags=()
           case "${tag}" in *-*) flags+=(--prerelease) ;; esac
-          gh release create "${tag}" --title "${tag}" --notes-file "RELEASE_NOTES_${tag}.md" --verify-tag "${flags[@]}"
+          gh release create "${tag}" --title "${tag}" --notes-file "release-notes/${tag}.md" --verify-tag "${flags[@]}"
