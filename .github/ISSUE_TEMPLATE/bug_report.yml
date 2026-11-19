@@ -51,6 +51,12 @@ body:
       label: System size
       description: Your battery size and whether you have solar. For example "Two Base Core, with solar".
   - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Settings → Devices & Services → Base Power → the three-dot menu → Download diagnostics. Attach the file or paste it here. Tokens, your email, site and account ids, and Wi-Fi names are already removed.
+      render: json
+  - type: textarea
     id: logs
     attributes:
       label: Logs
