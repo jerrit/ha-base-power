@@ -92,7 +92,7 @@ The device is named after your site's street and city, for example "Base Power 1
 |--------|-------------|------|
 | Battery Level | State of charge from the live service context | % |
 | Battery Backup Time (Current Load) | Backup remaining if the house keeps drawing what it draws right now. Moves up and down with your load | hours |
-| Battery Count | Battery units, from the detected model, otherwise from the battery type Base reports (single, dual, or wall), otherwise the chosen capacity. `source` shows which. No long-term statistics since 1.14.0-beta.2 | — |
+| Battery Count | Battery units, from the detected model, otherwise from the battery type Base reports (single, dual, or wall), otherwise the chosen capacity. `source` shows which. No long-term statistics since 1.14.0 | — |
 | Battery Status | Operating state (Installed, In Service, etc.) | — |
 | System Capacity | Detected from the battery SKU, then the battery model, then Base's nameplate, then an estimate from Base's backup time, then the Battery Capacity option. See [How capacity is worked out](#how-capacity-is-worked-out). Attributes show `capacity_source`, `estimated_usable_kwh`, `estimated_capacity_kwh`, `nameplate_capacity_kwh`, `hardware_sku`, and the raw `batteries` list | kWh |
 | Current Power | Live home load, or the latest 15-minute average kW when live load is missing | W |
@@ -254,13 +254,11 @@ After a restart the estimate needs a few minutes of readings, so System Capacity
 
 ## Changelog
 
-### v1.14.0-beta.3
+### v1.14.0
 - **System Capacity** for batteries the integration doesn't know, such as `GEN3`, is estimated from Base's 750 W backup time (`capacity_source: estimated`). It's only used when it lands within 12% of a known size. The raw reading is always on `estimated_usable_kwh`. See [How capacity is worked out](#how-capacity-is-worked-out).
 - Base's nameplate size from the new `GetHome` call is used when Base sends it (`capacity_source: nameplate`), and the product name shows on System Capacity. One extra call every 6 hours.
 - **Battery Count** comes from the battery type (single, dual, or wall) when the model isn't mapped, so a `GEN3` dual counts as 2. A `source` attribute shows where it came from.
 - Diagnostics include a `capacity_estimate` summary.
-
-### v1.14.0-beta.2
 - The Energy Dashboard section no longer pairs Home Usage (Total) with Solar to Home (Total), which counted solar twice. Homes with solar get a grid import template instead. The Battery discharge row is gone.
 - The device is named after the site's street and city, and its model is the battery SKU or model. Existing installs pick up the address on the next restart. Entity IDs don't change.
 - Unknown battery hardware (an unmapped SKU, or a `GEN3` battery) logs one warning. System Capacity shows `hardware_sku` and the raw `batteries` list.
@@ -271,8 +269,6 @@ After a restart the estimate needs a few minutes of readings, so System Capacity
 - The Core capacity choices are 39.2 and 78.4 kWh, matching detection. Saved 40 and 80 kWh choices switch over automatically.
 - **Energy Cost Today** has a state class and resets at midnight, so it can be the cost entity in the Energy Dashboard.
 - **Battery Count** no longer records long-term statistics. Home Assistant shows a repair, "The entity no longer has a state class". Choosing delete is safe; see [Troubleshooting](#battery-count-says-the-entity-no-longer-has-a-state-class).
-
-### v1.14.0-beta.1
 - Adds **Home Usage (Total)** and, on homes with solar, **Solar to Home (Total)**: running totals that never reset. The daily sensors miss each day's last hour because Base posts it after midnight. Use the new sensors in the Energy Dashboard.
 - Renamed Bill Amount to **Last Bill Amount** and fixed it. It showed spend so far this cycle, the same as Bill to Date. It now shows your last bill. The entity ID doesn't change.
 - Homes without Base energy service no longer get billing sensors that are always unknown. Existing ones are removed.
@@ -433,7 +429,7 @@ After a restart the estimate needs a few minutes of readings, so System Capacity
 About 132 calls an hour, all from your Home Assistant to Base's cloud. Battery level, power, and grid status every 60 seconds. Usage every 15 minutes. Billing and account details every 6 hours. Failed calls back off instead of retrying every minute. Base hasn't published a rate limit. The 60-second calls are what keep outage detection quick; the rest are spread out to keep the load low.
 
 ### Battery Count says "The entity no longer has a state class"
-Expected after updating to 1.14.0-beta.2 or newer. Battery Count is a fixed number, so it no longer keeps long-term statistics. Choose to delete them in the repair. The sensor keeps working and its entity ID doesn't change.
+Expected after updating to 1.14.0 or newer. Battery Count is a fixed number, so it no longer keeps long-term statistics. Choose to delete them in the repair. The sensor keeps working and its entity ID doesn't change.
 
 ### Reporting a problem
 - Go to **Settings** → **Devices & Services** → **Base Power**, open the three-dot menu, and choose **Download diagnostics**. Attach the file to your issue. Tokens, your email, site and account ids, and WiFi names are already removed.
