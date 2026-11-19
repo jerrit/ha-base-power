@@ -17,7 +17,7 @@ jobs:
     needs: tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Check manifest version matches the tag
         run: |
           tag="${GITHUB_REF_NAME}"
