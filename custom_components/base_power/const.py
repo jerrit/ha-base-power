@@ -12,7 +12,7 @@ CLERK_DOMAIN = "https://clerk.basepowercompany.com"
 CLERK_JS_VERSION = "5"
 
 # Polling intervals (seconds).
-# Steady state is about 131 calls/hour:
+# Steady state is about 132 calls/hour:
 #   every 60 s, ServiceContext + GridStatus (120/hour)
 #   every 10 min, the v2 battery snapshot (6/hour). Every 60 s while the
 #     outage flag, voltage, or the last snapshot points to an outage.
@@ -20,13 +20,19 @@ CLERK_JS_VERSION = "5"
 #     run only when the overview fails or lacks that data.
 #   every 6 hours, DashboardRoot + Wifi + Billing + UsageCycles
 #     + v2 CurrentBillingCycle + v2 battery GetAccount + v2 ListAccounts
-#     (about 1/hour)
+#     + v2 GetLocation + v2 GetDailyEnergy + GetHome (about 1.7/hour). After a failed
+#     call this tier runs again after 15 minutes, then 30, 60, and so on,
+#     up to 6 hours.
 # The v2 GetRecentGridVoltage runs only when GridStatus has no voltage.
 # The coordinator interval is the 15-minute tier. It does not repeat the
 # 60-second grid calls.
+REQUEST_TIMEOUT_SECONDS = 20
 GRID_SCAN_INTERVAL_SECONDS = 60
 USAGE_SCAN_INTERVAL_SECONDS = 15 * 60
 SLOW_SCAN_INTERVAL_SECONDS = 6 * 60 * 60
+# After a failed slow refresh, the retry waits 15 minutes, then doubles after
+# each failure in a row, up to the normal 6 hours.
+SLOW_RETRY_MAX_SECONDS = SLOW_SCAN_INTERVAL_SECONDS
 SCAN_INTERVAL_SECONDS = USAGE_SCAN_INTERVAL_SECONDS
 # MobileGetGridStatus reports about 240 V while the grid is up.
 # 100 V is still grid. Under 50 V the feed has collapsed.
@@ -34,19 +40,19 @@ GRID_PRESENT_VOLTS = 100.0
 GRID_COLLAPSED_VOLTS = 50.0
 
 # Battery capacity options: label → (units, kWh).
-# Base lists Core as 39.2 kWh per unit (78.4 kWh for two). The dropdown uses
-# the rounded sizes, 40 and 80. Original hardware is already 25 and 50.
+# Core uses Base's published sizes, 39.2 kWh per unit (78.4 kWh for two), the
+# same as SKU detection. Older versions saved the rounded 40 and 80 labels.
 BATTERY_CAPACITY_OPTIONS: dict[str, tuple[int, float]] = {
     "20 kWh (1 Wall)": (1, 20),
     "25 kWh (1 unit)": (1, 25),
-    "40 kWh (1 Core)": (1, 40),
+    "39.2 kWh (1 Core)": (1, 39.2),
     "50 kWh (2 units)": (2, 50),
-    "80 kWh (2 Core)": (2, 80),
+    "78.4 kWh (2 Core)": (2, 78.4),
 }
 _BATTERY_CAPACITY_ALIASES = {
-    "39.2 kWh (1 Core)": "40 kWh (1 Core)",
-    "40 kWh (1 unit)": "40 kWh (1 Core)",
-    "78.4 kWh (2 Core)": "80 kWh (2 Core)",
+    "40 kWh (1 Core)": "39.2 kWh (1 Core)",
+    "40 kWh (1 unit)": "39.2 kWh (1 Core)",
+    "80 kWh (2 Core)": "78.4 kWh (2 Core)",
 }
 DEFAULT_BATTERY_CAPACITY = "25 kWh (1 unit)"
 # Battery hardware SKU from the v2 battery account → (units, kWh).
@@ -59,6 +65,64 @@ HARDWARE_SKU_CAPACITY: dict[str, tuple[int, float]] = {
     "BASE1_SINGLE": (1, 39.2),
     "BASE1_DUAL": (2, 78.4),
 }
+# Battery models from the site's location, used when the SKU is missing.
+# Only GEN1 is mapped: it matches the GRO SKUs. What GEN3 stands for is not
+# confirmed yet, so it falls back to the saved capacity.
+BATTERY_MODEL_CAPACITY: dict[tuple[str, str], tuple[int, float]] = {
+    ("GEN1", "SINGLE"): (1, 25),
+    ("GEN1", "DUAL"): (2, 50),
+    ("GEN1", "WALL"): (1, 20),
+}
+
+
+def battery_model_capacity(batteries: list[dict[str, str | None]]) -> tuple[int, float] | None:
+    """Add up (units, kWh) for the listed batteries. None if any is unknown."""
+    if not batteries:
+        return None
+    units = 0
+    kwh = 0.0
+    for battery in batteries:
+        known = BATTERY_MODEL_CAPACITY.get((battery.get("generation"), battery.get("variant")))
+        if known is None:
+            return None
+        units += known[0]
+        kwh += known[1]
+    return units, round(kwh, 1)
+
+
+# Units per battery type. Holds for every generation: a single is one unit.
+BATTERY_VARIANT_UNITS: dict[str, int] = {"SINGLE": 1, "DUAL": 2, "WALL": 1}
+
+
+def battery_variant_count(batteries: list[dict[str, str | None]]) -> int | None:
+    """Units from the battery types alone. None if any type is unknown."""
+    if not batteries:
+        return None
+    units = [BATTERY_VARIANT_UNITS.get(battery.get("variant") or "") for battery in batteries]
+    if None in units:
+        return None
+    return sum(units)
+
+
+# Capacity estimate from Base's backup time, for hardware not in the tables
+# above. Base's 750 W backup estimate is usable energy ÷ 0.75 kW.
+ESTIMATE_LOAD_KW = 0.75
+# Usable share of the nameplate. Measured on one GRO_SINGLE: 22.5 of 25 kWh.
+ESTIMATE_USABLE_FRACTION = 0.9
+# Readings below this charge are skipped. A small error in a low percent
+# would scale up into a large error in size.
+ESTIMATE_MIN_SOC_PERCENT = 50
+# Median of the last hour of 60-second readings, once there are a few
+ESTIMATE_SAMPLES = 60
+ESTIMATE_MIN_SAMPLES = 3
+# The estimate is used only within this share of a known size. Known sizes
+# are at least 20% apart, so a reading outside this is not trusted.
+ESTIMATE_SNAP_TOLERANCE = 0.12
+# Base's own nameplate (GetHome) must be this close to a known size to
+# borrow that size's unit count.
+NAMEPLATE_MATCH_TOLERANCE = 0.03
+
+
 # Legacy fallback for installs that still store an integer unit count.
 BATTERY_CAPACITY_PER_UNIT_KWH = 25
 DEFAULT_BATTERY_COUNT = 1
@@ -91,6 +155,40 @@ CONF_EMAIL = "email"
 CONF_WIFI_SSID = "wifi_ssid"
 CONF_BATTERY_COUNT = "battery_count_override"
 CONF_BATTERY_CAPACITY = "battery_capacity"
+# Street and city from the setup site picker. Names the device.
+CONF_SITE_LABEL = "site_label"
+
+# Running energy totals, saved across restarts
+STORAGE_VERSION = 1
+def totals_store_key(entry_id: str) -> str:
+    """Storage key for one config entry's running totals."""
+    return f"base_power.{entry_id}.totals"
+
+
+# Hours already counted, kept this long so a late hour is counted once and a
+# finished day can be checked against Base's daily total.
+COUNTED_HOURS_KEEP_SECONDS = 40 * 86400
+# Base's daily totals are asked for this far back. Base keeps about a month.
+DAILY_ENERGY_LOOKBACK_SECONDS = 34 * 86400
+# A day is checked against Base's daily total once it has been over this long.
+DAY_SETTLE_SECONDS = 6 * 3600
+# A smaller gap between Base's daily total and the counted hours is rounding.
+DAY_REPAIR_MIN_KWH = 0.05
+
+# The usage tier is stale after this many refreshes in a row with no new data.
+USAGE_STALE_AFTER_FAILURES = 4
+# Battery Charging stays on for a while after a rise in charge, since Base
+# reports whole percents. One rise holds it for the short hold. Once two
+# rises are seen, the hold is twice the time between them, up to the long
+# hold. A slow charge can take hours per percent.
+CHARGING_FIRST_HOLD_SECONDS = 3600
+CHARGING_HOLD_SECONDS = 3 * 3600
+# A rise back to the level the charge just fell from is rounding, not
+# charging, when it comes within this long of the fall.
+CHARGING_BOUNCE_SECONDS = 3600
+# A missed ServiceContext reuses the last good one for this long, so one
+# failed 60-second call does not blank the live sensors.
+CONTEXT_HOLD_SECONDS = 3 * 60
 
 # Platforms
-PLATFORMS = ["sensor", "binary_sensor", "select"]
+PLATFORMS = ["sensor", "binary_sensor"]

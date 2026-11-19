@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**", "release/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/**", "release/**"]
   workflow_dispatch:
   workflow_call:
 
@@ -37,7 +37,7 @@ jobs:
       - name: Show Home Assistant version
         run: python -c "from homeassistant.const import __version__; print('Home Assistant', __version__)"
       - name: Run tests
-        run: python -m pytest -q tests
-      - name: Lint (report only)
+        run: python -m pytest -q --cov --cov-report=term --cov-fail-under=88
+      - name: Lint
         if: matrix.ha == 'pinned'
-        run: ruff check custom_components --output-format=concise --exit-zero
+        run: ruff check . --output-format=concise
