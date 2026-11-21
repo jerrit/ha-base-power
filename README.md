@@ -38,7 +38,7 @@ Unofficial Home Assistant integration for [Base Power](https://basepowercompany.
 - **Energy Monitoring** — 15-minute interval energy from recent usage, for the Energy Dashboard
 - **Daily Statistics** — Peak, low, total, and interval count from today's usage
 - **Battery Status** — Operating state (Installed, In Service, etc.)
-- **Battery Charging** — On after the state of charge rises, off after it falls or while the battery is full
+- **Battery Charging** — On while power goes into the battery; otherwise on after the state of charge rises, off after it falls or while the battery is full
 - **Solar Status** — Whether the dashboard reports solar
 - **WiFi** — The network the battery is on, as Base reports it, and its signal strength
 - **Battery Connectivity** — Whether the gateway is connected
@@ -109,7 +109,7 @@ The device is named after your site's street and city, for example "Base Power 1
 | Grid Current | Grid kW × 1000 ÷ volts. Negative means export | A |
 | Grid Voltage | Latest grid voltage, updated every minute | V |
 | Power from Grid | Live power drawn from the grid. Negative means export | W |
-| Battery Power | Live battery power. Positive means the battery is discharging | W |
+| Battery Power | Live battery power. Positive means the battery is discharging, negative means it's charging | W |
 | Solar Power | Live solar output. Only on homes with solar | W |
 | Solar Export Today | Solar energy sent to the grid today. Only on homes with solar | kWh |
 | Daily Total (Home Usage) | Same value as Home Usage Today (All Sources). Off by default on new installs | kWh |
@@ -144,7 +144,7 @@ The 24-hour sensors are a sliding window, so they have no state class and do not
 | Grid Power | Grid supply is available. Attributes show `voltage_volts`, `active_outage`, `voltage_source`, and `battery_state`. An off-grid `battery_state` turns it off even while voltage and `active_outage` look normal |
 | Solar Connected | Whether solar panels are present |
 | Battery Connected | Gateway is connected |
-| Battery Charging | On after the state of charge rises. One rise holds it on for an hour; on a steady charge the hold follows the pace, up to 3 hours. A 1% bounce back up right after a drop doesn't count. Off after it falls, while the battery is full, and while the battery is powering the home. Unknown until the charge has moved once after a restart |
+| Battery Charging | On while Battery Power shows at least 0.2 kW going into the battery, even at 99 or 100%, and off as soon as that stops. Without a power reading, it's on after the state of charge rises. One rise holds it on for an hour; on a steady charge the hold follows the pace, up to 3 hours. A 1% bounce back up right after a drop doesn't count. Off after it falls, while the battery is full, and while the battery is powering the home. Unknown until the charge has moved once after a restart |
 | Grid Support | On during a grid support event: when the grid is up and the battery is powering the home (checked every 60 seconds), or when Base's event list shows one running. Grid support never turns Grid Power off, so outage automations won't fire on it. Attributes show `detected_by` and `battery_output_kw` |
 
 ### Diagnostic Sensors
@@ -229,8 +229,8 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 - **Daily Total (Home Usage).** Same value as Home Usage Today. Unknown when that sum is missing.
 - **Daily Average Grid Interval.** Today's usage total divided by the number of 15-minute intervals today. Unknown when today has no intervals.
 - **Grid Current.** `power_from_grid_kw * 1000 / voltage_volts` when voltage is above 0. Negative power is export and stays negative. Unknown when either reading is missing.
-- **Grid Voltage, Power from Grid, Battery Power, Solar Power.** Read from the same 60-second service-context and grid-voltage poll as Grid Current, so they add no API calls. Base sends kW in steps of 0.1, so the sensors move in 100 W steps. Unknown when Base sends no reading. Battery Power is Base's `from_storage` flow. Discharging is positive. The sign while charging is not confirmed yet: in the two samples so far where the grid supplied more than the home used, Battery Power stayed at 0 and did not go negative.
-- **Battery Charging.** Base reports the charge as a whole percent, so the sensor holds the last direction it saw. Check it during a real recharge after a discharge.
+- **Grid Voltage, Power from Grid, Battery Power, Solar Power.** Read from the same 60-second service-context and grid-voltage poll as Grid Current, so they add no API calls. Base sends kW in steps of 0.1, so the sensors move in 100 W steps. Unknown when Base sends no reading. Battery Power is Base's `from_storage` flow. Discharging is positive. Charging is negative, confirmed on the development account: during top-ups from 99% it reads -0.2 to -1.0 kW, and grid minus home matches. A very slow charge can still read 0.
+- **Battery Charging.** Follows Battery Power when it shows a charge, confirmed during top-ups on the development account. Otherwise Base's whole-percent charge decides, so the sensor holds the last direction it saw. Check it during a real recharge after a discharge.
 - **WiFi SSID.** Should match the network shown in the Base app without choosing anything. `source` should read `base`.
 - **Next Service Visit.** Not seen with a value yet. If Base has a visit scheduled for you, check that the time matches the app.
 - **Solar Export Today.** Not tested on a solar home yet.
@@ -253,6 +253,9 @@ The estimate ranks above the option because the settings form pre-fills 25 kWh, 
 After a restart the estimate needs a few minutes of readings, so System Capacity can show the option briefly first.
 
 ## Changelog
+
+### v1.14.1
+- **Battery Charging** turns on while Battery Power shows the battery charging, including top-ups from 99% to 100%. It stayed off through those before, because a 99 to 100 rise looked like rounding. It turns off as soon as the charge stops.
 
 ### v1.14.0
 - **System Capacity** for batteries the integration doesn't know, such as `GEN3`, is estimated from Base's 750 W backup time (`capacity_source: estimated`). It's only used when it lands within 12% of a known size. The raw reading is always on `estimated_usable_kwh`. See [How capacity is worked out](#how-capacity-is-worked-out).

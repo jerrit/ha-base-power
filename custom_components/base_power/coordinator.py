@@ -29,6 +29,7 @@ from .const import (
     CHARGING_BOUNCE_SECONDS,
     CHARGING_FIRST_HOLD_SECONDS,
     CHARGING_HOLD_SECONDS,
+    CHARGING_STORAGE_KW,
     CONF_BATTERY_CAPACITY,
     CONF_BATTERY_COUNT,
     CONF_WIFI_SSID,
@@ -80,6 +81,8 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # The level the charge last fell from, and when
     _fell_from: float | None = None
     _fell_at: float | None = None
+    # True while live battery power shows a charge
+    _power_charging = False
     # Unmapped hardware already logged, so the warning shows once
     _warned_hardware: str | None = None
 
@@ -366,20 +369,33 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _charging_state(self, percent: float | None, storage_kw: Any) -> bool | None:
         """Whether the battery is charging.
 
-        Base reports the charge as a whole percent, so one poll to the next
-        rarely differs. A rise means charging, and that holds for a while:
-        an hour after a single rise, or twice the time between the last two
-        rises (up to CHARGING_HOLD_SECONDS) once the pace is known. A slow
-        charge can take hours per percent.
+        Live battery power comes first: power going into the battery means
+        charging, even at 99 or 100%. When it stops, so does Battery Charging.
+
+        Without it, the charge percent decides. Base reports it as a whole
+        percent, so one poll to the next rarely differs. A rise means
+        charging, and that holds for a while: an hour after a single rise, or
+        twice the time between the last two rises (up to
+        CHARGING_HOLD_SECONDS) once the pace is known. A slow charge can take
+        hours per percent, and may not show in the power reading at all.
 
         A rise back to the level the charge just fell from is rounding, not
         charging, so a battery idling at its reserve does not flick on. A
         fall, a full battery, or the battery powering the home means not
         charging. Unknown until the charge has moved once.
         """
+        storage = (
+            float(storage_kw)
+            if isinstance(storage_kw, (int, float))
+            and not isinstance(storage_kw, bool)
+            and math.isfinite(storage_kw)
+            else None
+        )
+        power_charging = storage is not None and storage <= -CHARGING_STORAGE_KW
         if percent is None:
             self._prev_soc = None
-            return None
+            self._power_charging = power_charging
+            return True if power_charging else None
         now = self._monotonic()
         if self._prev_soc is not None:
             delta = percent - self._prev_soc
@@ -410,12 +426,14 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._fell_from = self._prev_soc
                 self._fell_at = now
         self._prev_soc = percent
-        discharging = (
-            isinstance(storage_kw, (int, float))
-            and not isinstance(storage_kw, bool)
-            and math.isfinite(storage_kw)
-            and storage_kw >= GRID_SUPPORT_STORAGE_KW
-        )
+        if power_charging:
+            self._power_charging = True
+            return True
+        if self._power_charging and storage is not None:
+            # Live power showed a charge and now shows it stopped.
+            self._power_charging = False
+            self._charging = False
+        discharging = storage is not None and storage >= GRID_SUPPORT_STORAGE_KW
         if percent >= 99.5 or discharging or (
             self._charging
             and self._charge_rose_at is not None

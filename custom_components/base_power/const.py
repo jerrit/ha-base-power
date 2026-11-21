@@ -186,6 +186,9 @@ CHARGING_HOLD_SECONDS = 3 * 3600
 # A rise back to the level the charge just fell from is rounding, not
 # charging, when it comes within this long of the fall.
 CHARGING_BOUNCE_SECONDS = 3600
+# Live battery power at or below minus this many kW means charging. Base
+# reports it in 0.1 kW steps, so one step of -0.1 kW counts as noise.
+CHARGING_STORAGE_KW = 0.15
 # A missed ServiceContext reuses the last good one for this long, so one
 # failed 60-second call does not blank the live sensors.
 CONTEXT_HOLD_SECONDS = 3 * 60
