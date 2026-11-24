@@ -30,6 +30,12 @@ BATTERY_STATES: dict[int, str] = {
     6: "overcurrent",
     7: "overcurrent_standby",
 }
+# BatteryWifiConnection.status → the names the service context used
+SNAPSHOT_WIFI_STATES: dict[int, str] = {
+    2: "not_connected",
+    3: "connecting",
+    4: "connected",
+}
 OFF_GRID_STATES = frozenset({"outage", "no_home_power", "overcurrent", "overcurrent_standby"})
 
 # Field layout of each state message: field number → key
@@ -223,6 +229,8 @@ def empty_snapshot() -> dict[str, Any]:
         "backup_hours_750w": None,
         "overcurrent_limit_kw": None,
         "power_flow": None,
+        "wifi_ssid": None,
+        "wifi_state": None,
     }
 
 
@@ -233,6 +241,16 @@ def parse_battery_snapshot(data: bytes) -> dict[str, Any]:
     if snapshot is None:
         return result
     for field_num, kind, value in _iter_fields(snapshot):
+        if field_num == 1 and kind == "bytes":
+            # wifi {1 status, 2 ssid, 3 observed_at}
+            status = 0
+            for sub_num, sub_kind, sub_value in _iter_fields(value):
+                if sub_num == 1 and sub_kind == "varint":
+                    status = sub_value
+                elif sub_num == 2 and sub_kind == "bytes":
+                    result["wifi_ssid"] = sub_value.decode("utf-8", "replace") or None
+            result["wifi_state"] = SNAPSHOT_WIFI_STATES.get(status)
+            continue
         state = BATTERY_STATES.get(field_num)
         if state is None or kind != "bytes":
             continue
@@ -275,6 +293,7 @@ def empty_overview() -> dict[str, Any]:
         "energy_today": None,
         "solar_export_today_kwh": None,
         "hours": [],
+        "backup_latest": None,
     }
 
 
@@ -347,6 +366,23 @@ def parse_daily_overview(data: bytes, start: int, end: int) -> dict[str, Any]:
                 if math.isfinite(export):
                     export_kwh += export
                 hours_today += 1
+        elif field_num == 2:
+            # The app's "Estimated duration" chart: 15-minute samples of
+            # {2 hours at the current load, 3 hours at 750 W}. Keep the newest.
+            stamp, numbers = _sample(value)
+            hours_750w = numbers.get(3)
+            if stamp is None or hours_750w is None or not math.isfinite(hours_750w):
+                continue
+            latest = result["backup_latest"]
+            if latest is None or stamp > latest["timestamp"]:
+                current = numbers.get(2)
+                result["backup_latest"] = {
+                    "timestamp": stamp,
+                    "backup_hours": (
+                        round(current, 2) if current is not None and math.isfinite(current) else None
+                    ),
+                    "backup_hours_750w": round(hours_750w, 2),
+                }
         elif field_num == 3:
             interval: dict[str, int | None] = {"start": None, "end": None}
             for sub_num, sub_kind, sub_value in _iter_fields(value):
@@ -488,6 +524,48 @@ def live_grid_support(grid_is_up: bool | None, storage_kw: float | None) -> bool
     if not math.isfinite(storage_kw):
         return None
     return storage_kw >= GRID_SUPPORT_STORAGE_KW
+
+
+_SNAPSHOT_FLOWS = {
+    "power_from_grid_kw": "from_grid_kw",
+    "power_from_storage_kw": "from_storage_kw",
+    "power_from_solar_kw": "from_solar_kw",
+    "power_to_home_kw": "to_home_kw",
+}
+
+
+def fill_context_from_snapshot(
+    context: dict[str, Any], snapshot: dict[str, Any]
+) -> dict[str, Any]:
+    """Fill the live readings the service context no longer has.
+
+    Base retired MobileGetServiceContext in November 2026. The snapshot
+    has the same power flow and backup hours. It has the battery percent
+    only while off grid; on grid the coordinator estimates it from the
+    750 W backup time. Values already in the context win.
+    """
+    if not snapshot.get("available"):
+        return context
+    filled = dict(context)
+    filled["available"] = True
+    flow = snapshot.get("power_flow") or {}
+    for key, name in _SNAPSHOT_FLOWS.items():
+        if filled.get(key) is None and flow.get(name) is not None:
+            filled[key] = flow[name]
+    if filled.get("available_backup_hours") is None:
+        filled["available_backup_hours"] = snapshot.get("backup_hours")
+    if filled.get("available_backup_hours_750w") is None:
+        filled["available_backup_hours_750w"] = snapshot.get("backup_hours_750w")
+    if filled.get("state_of_energy_raw") is None:
+        filled["state_of_energy_raw"] = snapshot.get("state_of_energy_percent")
+    state = snapshot.get("state")
+    if filled.get("home_has_power") is None and state not in (None, "telemetry_unavailable"):
+        filled["home_has_power"] = state != "no_home_power"
+    if filled.get("wifi_ssid") is None:
+        filled["wifi_ssid"] = snapshot.get("wifi_ssid")
+    if filled.get("wifi_state") is None:
+        filled["wifi_state"] = snapshot.get("wifi_state")
+    return filled
 
 
 def parse_recent_grid_voltage(data: bytes) -> dict[str, Any]:

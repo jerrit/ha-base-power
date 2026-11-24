@@ -32,14 +32,21 @@ def _polls(coordinator, percents, storage_kw=0.0, step=60.0):
     return states
 
 
-def test_unknown_until_the_charge_moves(coordinator):
-    assert _polls(coordinator, [80.0, 80.0, 80.0]) == [None, None, None]
+def test_unknown_until_the_charge_moves_without_a_power_reading(coordinator):
+    assert _polls(coordinator, [80.0, 80.0, 80.0], storage_kw=None) == [None, None, None]
+
+
+def test_an_idle_battery_reads_off_not_unknown(coordinator):
+    # Issue #26: a battery sitting at 95% on grid read unknown for days.
+    assert _polls(coordinator, [95.0, 95.0, 95.0]) == [False, False, False]
+    # A rise still turns it on.
+    assert _polls(coordinator, [96.0]) == [True]
 
 
 def test_a_rise_holds_through_the_flat_polls_that_follow(coordinator):
     # 80 -> 81, then an hour of 81. The old logic went unknown after one poll.
     states = _polls(coordinator, [80.0, 81.0] + [81.0] * 60)
-    assert states[0] is None
+    assert states[0] is False
     assert all(state is True for state in states[1:])
 
 
@@ -72,9 +79,11 @@ def test_battery_powering_the_home_is_not_charging(coordinator):
     assert coordinator._charging_state(52.0, 0.1) is True
 
 
-def test_a_missed_reading_is_unknown_and_does_not_invent_a_change(coordinator):
+def test_a_missed_reading_does_not_invent_a_change(coordinator):
     _polls(coordinator, [50.0, 51.0])
-    assert coordinator._charging_state(None, 0.0) is None
+    assert coordinator._charging_state(None, None) is None
+    # Without a percent, a power reading with no charge still means off.
+    assert coordinator._charging_state(None, 0.0) is False
     # 51 -> (missing) -> 60 is not compared across the gap, but the hold remains.
     assert coordinator._charging_state(60.0, 0.0) is True
 
@@ -115,3 +124,47 @@ def test_rounding_flicker_at_the_reserve_is_not_charging(coordinator):
 def test_a_rise_past_the_level_it_fell_from_is_charging(coordinator):
     _polls(coordinator, [21.0, 20.0, 21.0])
     assert _polls(coordinator, [22.0]) == [True]
+
+
+def _flow(coordinator, readings, step=60.0):
+    states = []
+    for percent, storage in readings:
+        coordinator._monotonic.now += step
+        states.append(coordinator._charging_state(percent, storage))
+    return states
+
+
+def test_a_top_up_from_99_is_charging_while_power_goes_in(coordinator):
+    # Seen on a GRO_SINGLE: it drifts to 99%, charges at 0.2-0.5 kW back to
+    # 100%, then idles. The percent alone reads that as rounding.
+    states = _flow(
+        coordinator,
+        [(100.0, 0.0), (99.0, 0.0), (99.0, -0.5), (99.0, -0.5), (100.0, -0.2), (100.0, 0.0)],
+    )
+    assert states == [False, False, True, True, True, False]
+
+
+def test_power_going_in_is_charging_before_the_percent_has_moved(coordinator):
+    assert _flow(coordinator, [(60.0, -1.0)]) == [True]
+
+
+def test_charging_ends_when_the_power_stops(coordinator):
+    # A rise would hold for an hour, but live power says the charge stopped.
+    states = _flow(coordinator, [(50.0, -1.0), (51.0, -1.0), (51.0, 0.0), (51.0, 0.0)])
+    assert states == [True, True, False, False]
+
+
+def test_a_missed_power_reading_keeps_the_percent_logic(coordinator):
+    # None means no reading, not "stopped", so the rise still holds.
+    states = _flow(coordinator, [(50.0, -1.0), (51.0, -1.0), (51.0, None)])
+    assert states == [True, True, True]
+
+
+def test_a_tenth_of_a_kilowatt_in_is_noise(coordinator):
+    assert _flow(coordinator, [(100.0, 0.0), (99.0, -0.1), (99.0, -0.1)]) == [False, False, False]
+
+
+def test_power_going_in_counts_without_a_percent(coordinator):
+    assert coordinator._charging_state(None, -0.5) is True
+    assert coordinator._charging_state(None, 0.0) is False
+    assert coordinator._charging_state(None, None) is None

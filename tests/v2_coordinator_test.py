@@ -157,6 +157,12 @@ def test_missing_home_usage_is_unknown():
     assert data["derived"]["self_sufficiency_percent"] is None
 
 
+def test_solar_noise_does_not_mean_the_site_has_solar():
+    """Issue #26: a site without panels reported 0.0001 kWh of solar every hour."""
+    assert _compose("on_grid", energy_solar=0.002)["dashboard"]["has_solar"] is False
+    assert _compose("on_grid", energy_solar=0.5)["dashboard"]["has_solar"] is True
+
+
 def test_self_sufficiency_caps_at_100_when_solar_exports():
     data = _compose("on_grid", energy_solar=9.0)
     assert data["derived"]["self_sufficiency_percent"] == 100.0
@@ -172,32 +178,24 @@ class FakeApi:
         self._api = api_mod.BasePowerApiClient
         self._v2 = v2
         self.calls: list[str] = []
-        self.context = {"available": True, "is_active_outage": False, "home_has_power": True}
+        self.status = {"available": True, "is_active_outage": False, "gateway_connected": True}
         self.voltage: float | None = 245.0
-        self.fail_voltage = False
+        self.fail_status = False
         self.v2_voltage: float | None = 244.8
         self.snapshot_state = "on_grid"
+        self.snapshot_extra: dict = {}
         self.fail_snapshot = False
-        self.fail_context = False
 
-    combine_grid_telemetry = None  # set in __init__ below
+    combine_grid_telemetry = None  # set in _coordinator below
 
-    async def get_service_context(self, numeric_id):
-        self.calls.append("ServiceContext")
-        if self.fail_context:
+    async def get_service_status(self, numeric_id):
+        self.calls.append("ServiceStatus")
+        if self.fail_status:
             raise ConnectionError("down")
-        context = self._api._empty_service_context()
-        context.update(self.context)
-        return context
-
-    async def get_grid_status(self, numeric_id):
-        self.calls.append("GridStatus")
-        if self.fail_voltage:
-            raise ConnectionError("down")
-        voltage = self._api._empty_grid_voltage()
-        if self.voltage is not None:
-            voltage.update(available=True, voltage_volts=self.voltage, voltage_samples=1)
-        return voltage
+        status = self._api._parse_service_status(b"")
+        status.update(self.status)
+        status["voltage_volts"] = self.voltage
+        return status
 
     async def get_recent_grid_voltage(self, address):
         self.calls.append("RecentGridVoltage")
@@ -211,7 +209,7 @@ class FakeApi:
         if self.fail_snapshot:
             raise ConnectionError("down")
         snapshot = self._v2.empty_snapshot()
-        snapshot.update(available=True, state=self.snapshot_state)
+        snapshot.update(available=True, state=self.snapshot_state, **self.snapshot_extra)
         return snapshot
 
 
@@ -226,6 +224,7 @@ async def _coordinator(hass):
     fake.combine_grid_telemetry = api.BasePowerApiClient.combine_grid_telemetry
     fake._empty_service_context = api.BasePowerApiClient._empty_service_context
     fake._empty_grid_voltage = api.BasePowerApiClient._empty_grid_voltage
+    fake._parse_service_status = api.BasePowerApiClient._parse_service_status
     coordinator.api = fake
     coordinator.service_location_id = "loc-1"
     coordinator._config_entry = types.SimpleNamespace(options={})
@@ -238,7 +237,6 @@ async def _coordinator(hass):
     coordinator._poll.mark_slow(coordinator._monotonic())
     coordinator._grid = _grid(api, volts=245.0)
     coordinator._snapshot = v2.empty_snapshot()
-    coordinator._polls_since_snapshot = 0
     coordinator.data = {"seed": True}
 
     async def no_auth():
@@ -248,12 +246,13 @@ async def _coordinator(hass):
     return coordinator, fake
 
 
-def _run_polls(setup, polls: int):
+def _run_polls(setup, polls: int, numeric_id: int | None = 7):
     async def run():
         hass = HomeAssistant(str(_ROOT))
         frame.async_setup(hass)
         try:
             coordinator, fake = await _coordinator(hass)
+            coordinator._poll.numeric_id = numeric_id
             setup(fake)
             results = []
             for _ in range(polls):
@@ -267,24 +266,30 @@ def _run_polls(setup, polls: int):
     return asyncio.run(run())
 
 
+_LIVE_SNAPSHOT = {
+    "backup_hours": 18.0,
+    "backup_hours_750w": 30.0,
+    "power_flow": {"from_grid_kw": 1.4, "from_storage_kw": 0.0, "from_solar_kw": 0.0,
+                   "non_solar_to_home_kw": 1.4, "to_home_kw": 1.4},
+}
+
+
 def _context_polls(hass_steps):
-    """Run polls with a fake clock. Each step is (seconds since start, context fails)."""
+    """Run polls with a fake clock. Each step is (seconds since start, live calls fail)."""
 
     async def run():
         hass = HomeAssistant(str(_ROOT))
         frame.async_setup(hass)
         try:
             coordinator, fake = await _coordinator(hass)
-            fake.context = {
-                "available": True, "is_active_outage": False, "home_has_power": True,
-                "state_of_energy_raw": 99, "power_to_home_kw": 1.4,
-            }
+            fake.snapshot_extra = dict(_LIVE_SNAPSHOT)
             clock = {"t": 1000.0}
             coordinator._monotonic = lambda: clock["t"]
             out = []
             for at, fails in hass_steps:
                 clock["t"] = 1000.0 + at
-                fake.fail_context = fails
+                fake.fail_status = fails
+                fake.fail_snapshot = fails
                 await coordinator.async_poll_grid_status()
                 out.append(coordinator.data["grid"])
             return out
@@ -294,18 +299,17 @@ def _context_polls(hass_steps):
     return asyncio.run(run())
 
 
-def test_one_missed_service_context_keeps_the_last_reading():
+def test_one_missed_live_poll_keeps_the_last_reading():
     grids = _context_polls([(0, False), (60, True), (120, False)])
     assert [g["power_to_home_kw"] for g in grids] == [1.4, 1.4, 1.4]
-    assert grids[1]["battery_soc_percent"] == grids[0]["battery_soc_percent"]
-    assert grids[1]["battery_soc_percent"] is not None
+    assert [g["backup_hours_750w"] for g in grids] == [30.0, 30.0, 30.0]
 
 
-def test_service_context_down_for_minutes_goes_unknown():
+def test_live_poll_down_for_minutes_goes_unknown():
     grids = _context_polls([(0, False), (60, True), (180, True), (240, True)])
     assert grids[2]["power_to_home_kw"] == 1.4  # 3 minutes: still held
     assert grids[3]["power_to_home_kw"] is None
-    assert grids[3]["battery_soc_percent"] is None
+    assert grids[3]["backup_hours_750w"] is None
 
 
 def test_no_held_context_before_the_first_good_one():
@@ -313,56 +317,55 @@ def test_no_held_context_before_the_first_good_one():
     assert grids[0]["power_to_home_kw"] is None
 
 
-def _snapshot_polls(results):
-    return [i + 1 for i, (calls, _) in enumerate(results) if "Snapshot" in calls]
+def test_the_snapshot_runs_on_every_poll():
+    """It is the only source of live power since Base retired ServiceContext."""
+    results = _run_polls(lambda fake: None, 3)
+    assert all(calls[:2] == ["Snapshot", "ServiceStatus"] for calls, _ in results)
 
 
-def test_snapshot_runs_every_tenth_poll_while_normal():
-    results = _run_polls(lambda fake: None, 25)
-    assert _snapshot_polls(results) == [10, 20]
+def test_snapshot_power_flow_fills_the_live_readings():
+    _calls, data = _run_polls(lambda fake: setattr(fake, "snapshot_extra", dict(_LIVE_SNAPSHOT)), 1)[0]
+    assert data["grid"]["power_from_grid_kw"] == 1.4
+    assert data["grid"]["power_to_home_kw"] == 1.4
+    assert data["derived"]["backup_hours"] == 18.0
+    assert data["derived"]["current_power_watts"] == 1400
 
 
-def test_snapshot_runs_every_poll_during_an_outage_flag():
-    def outage(fake):
-        fake.context = {"available": True, "is_active_outage": True, "home_has_power": True}
-
-    results = _run_polls(outage, 4)
-    assert _snapshot_polls(results) == [1, 2, 3, 4]
-
-
-def test_snapshot_runs_every_poll_when_voltage_collapses():
-    results = _run_polls(lambda fake: setattr(fake, "voltage", 0.0), 3)
-    assert _snapshot_polls(results) == [1, 2, 3]
-
-
-def test_off_grid_snapshot_keeps_the_fast_cadence():
-    results = _run_polls(lambda fake: setattr(fake, "snapshot_state", "overcurrent"), 14)
-    # First snapshot on poll 10 sees overcurrent; every poll after that checks again.
-    assert _snapshot_polls(results) == [10, 11, 12, 13, 14]
+def test_an_off_grid_snapshot_in_the_live_poll_turns_grid_power_off():
+    results = _run_polls(lambda fake: setattr(fake, "snapshot_state", "overcurrent"), 2)
     assert results[-1][1]["grid"]["grid_is_up"] is False
 
 
-def test_failing_snapshot_does_not_speed_up_polling():
-    results = _run_polls(lambda fake: setattr(fake, "fail_snapshot", True), 21)
-    assert _snapshot_polls(results) == [10, 20]
+def test_a_failing_snapshot_leaves_grid_power_to_the_voltage():
+    _calls, data = _run_polls(lambda fake: setattr(fake, "fail_snapshot", True), 1)[0]
+    assert data["grid"]["grid_is_up"] is True
+    assert data["grid"]["power_to_home_kw"] is None
 
 
-def test_legacy_voltage_is_used_without_calling_v2():
+def test_service_status_voltage_is_used_without_calling_v2():
     results = _run_polls(lambda fake: None, 2)
     for calls, data in results:
         assert "RecentGridVoltage" not in calls
         assert data["grid"]["voltage_volts"] == 245.0
-        assert data["sources"]["voltage"] == "legacy"
+        assert data["sources"]["voltage"] == "service_status"
 
 
-def test_v2_voltage_fills_in_when_legacy_has_none_or_fails():
+def test_v2_voltage_fills_in_when_service_status_has_none_or_fails():
     for setup in (lambda fake: setattr(fake, "voltage", None),
-                  lambda fake: setattr(fake, "fail_voltage", True)):
+                  lambda fake: setattr(fake, "fail_status", True)):
         calls, data = _run_polls(setup, 1)[0]
-        assert calls[:3] == ["ServiceContext", "GridStatus", "RecentGridVoltage"]
+        assert calls[:3] == ["Snapshot", "ServiceStatus", "RecentGridVoltage"]
         assert data["grid"]["voltage_volts"] == 244.8
         assert data["grid"]["grid_is_up"] is True
         assert data["sources"]["voltage"] == "v2"
+
+
+def test_without_a_numeric_id_only_the_v2_calls_run():
+    """Issue #30: the live poll used to stop here."""
+    calls, data = _run_polls(lambda fake: None, 1, numeric_id=None)[0]
+    assert calls[:2] == ["Snapshot", "RecentGridVoltage"]
+    assert "ServiceStatus" not in calls
+    assert data["grid"]["grid_is_up"] is True
 
 
 def test_no_voltage_from_either_api_stays_unknown():
@@ -376,17 +379,12 @@ def test_no_voltage_from_either_api_stays_unknown():
     assert data["sources"]["voltage"] is None
 
 
-def test_missing_home_power_field_does_not_speed_up_the_snapshot():
-    _, api, _, _ = _modules()
-    # A present service context without field 9 parses home_has_power as False.
-    parsed = api.BasePowerApiClient._parse_service_context(b"\x08\x01")
-    assert parsed["home_has_power"] is False
+def test_the_outage_flag_turns_grid_power_off():
+    def outage(fake):
+        fake.status = {"available": True, "is_active_outage": True}
 
-    def no_field_9(fake):
-        fake.context = {"available": True, "is_active_outage": False, "home_has_power": False}
-
-    results = _run_polls(no_field_9, 21)
-    assert _snapshot_polls(results) == [10, 20]
+    _calls, data = _run_polls(outage, 1)[0]
+    assert data["grid"]["grid_is_up"] is False
 
 
 def test_grid_power_data_records_the_battery_state_behind_an_off_state():
@@ -542,10 +540,16 @@ def test_known_sku_wins_over_the_battery_model():
 
 
 def test_unconfirmed_models_fall_back_to_the_saved_capacity():
-    for models in (_models(("GEN3", "SINGLE")), _models(("GEN1", "SINGLE"), (None, None)), []):
+    for models in (_models(("GEN4", "SINGLE")), _models(("GEN1", "SINGLE"), (None, None)), []):
         dashboard, kwh = _capacity({"battery_capacity": "39.2 kWh (1 Core)"}, None, models)
         assert (kwh, dashboard["capacity_source"]) == (39.2, "option")
         assert dashboard["model_capacity_kwh"] is None
+
+
+def test_gen3_single_is_a_base_core():
+    """Confirmed by an owner with BASE1_SINGLE (issue #26)."""
+    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, None, _models(("GEN3", "SINGLE")))
+    assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (39.2, 1, "model")
 
 
 def test_running_totals_include_every_hour_and_start_unknown():
@@ -595,13 +599,13 @@ def test_device_model_uses_the_sku_then_the_battery_model():
 
 # --- capacity for hardware the tables don't know -----------------------------------
 
-# A GEN3 single at full charge, as Base would report a Core: 35.28 kWh usable
+# A one-unit battery at full charge, as Base would report a Core: 35.28 kWh usable
 _CORE_READINGS = [(100, 47.04)] * 3
 
 
 def test_estimate_sizes_an_unknown_battery_over_the_prefilled_option():
-    gen3 = _models(("GEN3", "SINGLE"))
-    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, None, gen3, readings=_CORE_READINGS)
+    unknown = _models(("GEN4", "SINGLE"))
+    dashboard, kwh = _capacity({"battery_capacity": "25 kWh (1 unit)"}, None, unknown, readings=_CORE_READINGS)
     assert (kwh, dashboard["battery_count"], dashboard["capacity_source"]) == (39.2, 1, "estimated")
     assert dashboard["estimated_usable_kwh"] == 35.28
     assert dashboard["estimated_capacity_kwh"] == 39.2
@@ -619,7 +623,7 @@ def test_an_estimate_far_from_any_size_falls_back_to_the_option():
     # 30 kWh nameplate is 20% from 25 and 23% from 39.2, so it is not trusted.
     readings = [(100, 36.0)] * 3
     dashboard, kwh = _capacity({"battery_capacity": "39.2 kWh (1 Core)"}, None,
-                               _models(("GEN3", "SINGLE")), readings=readings)
+                               _models(("GEN4", "SINGLE")), readings=readings)
     assert (kwh, dashboard["capacity_source"]) == (39.2, "option")
     assert dashboard["estimated_usable_kwh"] == 27.0
     assert dashboard["estimated_capacity_kwh"] is None

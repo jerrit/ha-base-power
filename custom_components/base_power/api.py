@@ -27,6 +27,9 @@ _LOGGER = logging.getLogger(__name__)
 _TIMEOUT = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
 # gRPC status for a missing or expired token
 GRPC_UNAUTHENTICATED = "16"
+# gRPC status for a method the server no longer has. Base retired most of
+# the older DashboardAPI on 2026-11-24 this way.
+GRPC_UNIMPLEMENTED = "12"
 # MobileGetServiceContext gatewayWifi.state. Proto3 leaves out 0.
 GATEWAY_WIFI_STATES = {0: "connected", 1: "connecting", 2: "not_connected"}
 
@@ -387,6 +390,9 @@ class BasePowerApiClient:
         self._session = session
         self._token_provider = token_provider
         self._jwt: str | None = None
+        # Methods Base answered with "unknown method". They are not called
+        # again until Home Assistant restarts.
+        self._retired: set[str] = set()
 
     def set_jwt(self, jwt: str) -> None:
         """Set the current JWT for API calls."""
@@ -424,15 +430,23 @@ class BasePowerApiClient:
     async def async_discover_location_id(
         session: aiohttp.ClientSession, jwt: str
     ) -> str | None:
-        """Call MobileGetAvailableLocations to auto-discover service location ID."""
+        """Find the first site with GetAvailableLocations.
+
+        MobileGetAvailableLocations, retired in November 2026, is the
+        fallback. Both replies have the same shape.
+        """
         client = BasePowerApiClient(session)
         client.set_jwt(jwt)
-        try:
-            data, ok = await client._invoke("MobileGetAvailableLocations", optional=True)
-        except Exception:
-            _LOGGER.debug("Location discovery request failed", exc_info=True)
-            return None
-        return _parse_first_location_id(data) if ok else None
+        for method in ("GetAvailableLocations", "MobileGetAvailableLocations"):
+            try:
+                data, ok = await client._invoke(method, optional=True)
+            except Exception:
+                _LOGGER.debug("%s request failed", method, exc_info=True)
+                continue
+            location_id = _parse_first_location_id(data) if ok else None
+            if location_id:
+                return location_id
+        return None
 
     async def _call(
         self,
@@ -462,6 +476,8 @@ class BasePowerApiClient:
         fill the error log.
         """
         url = f"{API_HOST}/{service}/{method}"
+        if url in self._retired:
+            return b"", False
         body = _build_grpc_frame(payload)
         log = _LOGGER.debug if optional else _LOGGER.error
 
@@ -491,6 +507,15 @@ class BasePowerApiClient:
                 continue
             break
 
+        if grpc_status == GRPC_UNIMPLEMENTED:
+            self._retired.add(url)
+            _LOGGER.warning(
+                "Base no longer offers %s (%s). The integration uses the newer "
+                "call where there is one and stops calling this one",
+                method,
+                grpc_message or "unknown method",
+            )
+            return b"", False
         if grpc_status and grpc_status != "0":
             log(
                 "gRPC error calling %s: status=%s message=%s",
@@ -507,10 +532,42 @@ class BasePowerApiClient:
         return data, True
 
     async def get_dashboard_root(self, service_location_id: str) -> dict[str, Any]:
-        """Get dashboard root data, including the numeric service location id."""
+        """Get dashboard root data, including the numeric service location id.
+
+        GetDashboardRoot replaced MobileGetDashboardRoot in November 2026.
+        The older call is the fallback and is skipped once Base retires it.
+        """
         payload = _encode_service_location_request(service_location_id)
-        data = await self._call("MobileGetDashboardRoot", payload)
+        data, ok = await self._invoke("GetDashboardRoot", payload, optional=True)
+        if ok and data:
+            return self._parse_get_dashboard_root(data)
+        data = await self._call("MobileGetDashboardRoot", payload, optional=True)
         return self._parse_dashboard_root(data)
+
+    async def get_service_status(self, service_location_id: int) -> dict[str, Any]:
+        """Grid voltage, outage flag, and gateway link for the numeric site id."""
+        payload = _encode_int_service_location(service_location_id)
+        data, ok = await self._invoke("GetServiceStatus", payload, optional=True)
+        return self._parse_service_status(data if ok else b"")
+
+    async def get_battery_wifi_networks(self, address_id: str) -> dict[str, Any]:
+        """Wi-Fi networks the battery sees, with signal strength.
+
+        v2 ListWifiNetworks replaced MobileGetWifiMetrics and has the same
+        reply shape. The older call is the fallback.
+        """
+        from . import api_v2
+
+        payload = _encode_service_location_request(address_id)
+        data, ok = await self._invoke(
+            "ListWifiNetworks",
+            payload,
+            optional=True,
+            service=f"{api_v2.V2_PACKAGE}.BatteryService",
+        )
+        if ok and data:
+            return self._parse_wifi_metrics(data)
+        return await self.get_wifi_metrics(address_id)
 
     async def get_recent_usage(self, service_location_id: str) -> list[dict[str, Any]]:
         """Get recent 15-min interval usage. The address string is the site id."""
@@ -744,6 +801,105 @@ class BasePowerApiClient:
             result["service_location_id"] is not None,
         )
         return result
+
+    @staticmethod
+    def _parse_get_dashboard_root(data: bytes) -> dict[str, Any]:
+        """Parse GetDashboardRoot, which wraps everything in dashboardRoot (1).
+
+        dashboardRoot → serviceLocation (1) {1 id, 6 hasSolar}, address (5)
+        {9 timezoneIdentifier}, battery (10) {2 status, 3 hasSolar,
+        5 upcomingServiceDate}. The result has the same keys as
+        _parse_dashboard_root.
+        """
+        result: dict[str, Any] = {
+            "service_location_id": None,
+            "battery_status": 0,
+            "has_solar": False,
+            "time_zone": None,
+            "upcoming_service_at": None,
+        }
+        root = next((v for f, k, v in _iter_fields(data) if f == 1 and k == "bytes"), b"")
+        for field_num, kind, value in _iter_fields(root):
+            if kind != "bytes":
+                continue
+            if field_num == 1:
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 1 and sub_kind == "varint":
+                        result["service_location_id"] = _numeric_location_id(sub_value)
+                    elif sub_num == 6 and sub_kind == "varint" and sub_value:
+                        result["has_solar"] = True
+            elif field_num == 5:
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 9 and sub_kind == "bytes":
+                        result["time_zone"] = _text(sub_value)
+            elif field_num == 10:
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 2 and sub_kind == "varint":
+                        result["battery_status"] = sub_value
+                    elif sub_num == 3 and sub_kind == "varint" and sub_value:
+                        result["has_solar"] = True
+                    elif sub_num == 5 and sub_kind == "bytes":
+                        result["upcoming_service_at"] = _timestamp_seconds(sub_value)
+        _LOGGER.debug(
+            "GetDashboardRoot parsed: status=%s has_solar=%s has_id=%s",
+            result["battery_status"],
+            result["has_solar"],
+            result["service_location_id"] is not None,
+        )
+        return result
+
+    @staticmethod
+    def _parse_service_status(data: bytes) -> dict[str, Any]:
+        """Parse GetServiceStatus into the service context shape.
+
+        1 gridVoltage (int32 volts), 3 hasGateway, 4 gatewayConnection,
+        5 stateOfEnergy (0 to 5 bars, not a percent), 6 gatewayWifi
+        {1 ssid, 2 state}, 9 activeOutage. A missing bool on a present
+        message is false. Battery percent, backup time, and power flow are
+        not in this reply; they come from the v2 snapshot.
+
+        A missing voltage stays None. Proto3 also leaves out 0 V, but
+        reading that as an outage would turn Grid Power off on any reply
+        without the field. The snapshot and the outage flag cover outages.
+        """
+        context = BasePowerApiClient._empty_service_context()
+        context["voltage_volts"] = None
+        context["energy_bars"] = None
+        if not data:
+            return context
+        context["available"] = True
+        for field_num, kind, value in _iter_fields(data):
+            if field_num == 1 and kind == "varint" and value:
+                context["voltage_volts"] = float(value)
+            elif field_num == 3 and kind == "varint":
+                context["has_gateway"] = bool(value)
+            elif field_num == 4 and kind == "varint":
+                context["gateway_connected"] = bool(value)
+            elif field_num == 5 and kind == "varint":
+                context["energy_bars"] = value
+            elif field_num == 9 and kind == "varint":
+                context["is_active_outage"] = bool(value)
+            elif field_num == 6 and kind == "bytes":
+                state = 0
+                for sub_num, sub_kind, sub_value in _iter_fields(value):
+                    if sub_num == 1 and sub_kind == "bytes":
+                        context["wifi_ssid"] = _text(sub_value)
+                    elif sub_num == 2 and sub_kind == "varint":
+                        state = sub_value
+                context["wifi_state"] = GATEWAY_WIFI_STATES.get(state)
+        for key in ("has_gateway", "gateway_connected", "is_active_outage"):
+            if context[key] is None:
+                context[key] = False
+        if context["energy_bars"] is None:
+            context["energy_bars"] = 0
+        _LOGGER.debug(
+            "ServiceStatus: outage=%s voltage=%s gateway=%s bars=%s",
+            context["is_active_outage"],
+            context["voltage_volts"],
+            context["gateway_connected"],
+            context["energy_bars"],
+        )
+        return context
 
     @staticmethod
     def _parse_recent_usage(data: bytes) -> list[dict[str, Any]]:

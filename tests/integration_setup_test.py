@@ -24,7 +24,13 @@ async def test_setup_creates_sensors_with_live_values(hass, setup_integration):
     assert entry.state is ConfigEntryState.LOADED
     assert _state(hass, "sensor", "grid_voltage") == "244.2"
     assert _state(hass, "sensor", "power_from_grid") == "800"
-    assert _state(hass, "sensor", "battery_level") == "87.0"
+    # Estimated from 25 h at 750 W on a 25 kWh battery
+    assert _state(hass, "sensor", "battery_level") == "85.0"
+    assert hass.states.get(f"sensor.{PREFIX}_battery_level").attributes["source"] == (
+        "backup_hours_estimate"
+    )
+    assert _state(hass, "sensor", "battery_backup_time_current_load") == "20.5"
+    assert _state(hass, "binary_sensor", "battery_connected") == "on"
     assert _state(hass, "sensor", "battery_status") == "In Service"
     assert _state(hass, "sensor", "home_usage_total") == "2.0"
     assert _state(hass, "binary_sensor", "grid_power") == "on"
@@ -36,15 +42,48 @@ async def test_setup_creates_sensors_with_live_values(hass, setup_integration):
     assert hass.states.get(f"sensor.{PREFIX}_solar_power") is None
 
 
-async def test_backup_at_750w_comes_from_the_minute_poll_then_the_snapshot(
+async def test_backup_at_750w_comes_from_the_overview_then_the_snapshot(
     hass, setup_integration, fake_api
 ):
+    import time
+
+    fake_api.overview["backup_latest"] = {
+        "timestamp": int(time.time()) - 900,
+        "backup_hours": 19.0,
+        "backup_hours_750w": 24.0,
+    }
     entry = await setup_integration()
-    assert _state(hass, "sensor", "battery_backup_time_750_w_essentials") == "30.0"
-    fake_api.context["available_backup_hours_750w"] = None
+    # The overview matches the Base app, so it wins while fresh: 10% + 24 x 0.75 / 25
+    assert _state(hass, "sensor", "battery_backup_time_750_w_essentials") == "24.0"
+    assert _state(hass, "sensor", "battery_level") == "82.0"
+    # Older than 2 hours: the live snapshot takes over.
+    fake_api.overview["backup_latest"]["timestamp"] = int(time.time()) - 3 * 3600
+    entry.runtime_data._poll.overview = dict(fake_api.overview)
     await entry.runtime_data.async_poll_grid_status()
     await hass.async_block_till_done()
-    assert _state(hass, "sensor", "battery_backup_time_750_w_essentials") == "29.0"
+    assert _state(hass, "sensor", "battery_backup_time_750_w_essentials") == "25.0"
+
+
+async def test_outage_snapshot_gives_the_exact_battery_percent(hass, setup_integration, fake_api):
+    entry = await setup_integration()
+    fake_api.snapshot.update(state="outage", state_of_energy_percent=63)
+    await entry.runtime_data.async_poll_grid_status()
+    await hass.async_block_till_done()
+    level = hass.states.get(f"sensor.{PREFIX}_battery_level")
+    assert level.state == "63.0"
+    assert level.attributes["source"] == "snapshot"
+    assert _state(hass, "binary_sensor", "grid_power") == "off"
+
+
+async def test_live_poll_runs_without_a_numeric_site_id(hass, setup_integration, fake_api):
+    """Issue #30: Base sends no numeric id. The v2 calls still fill the live sensors."""
+    fake_api.dashboard["service_location_id"] = None
+    await setup_integration()
+    assert "get_service_status" not in fake_api.calls
+    assert _state(hass, "sensor", "grid_voltage") == "244.2"
+    assert _state(hass, "binary_sensor", "grid_power") == "on"
+    assert _state(hass, "sensor", "power_from_grid") == "800"
+    assert _state(hass, "sensor", "battery_level") == "85.0"
 
 
 async def test_wifi_network_comes_from_base_not_the_saved_option(hass, setup_integration, fake_api):
@@ -59,8 +98,8 @@ async def test_wifi_network_comes_from_base_not_the_saved_option(hass, setup_int
 
 async def test_wifi_falls_back_to_the_saved_option(hass, setup_integration, fake_api):
     fake_api.wifi["scan"] = {"HomeNet": 68, "Other": 40}
-    fake_api.context["wifi_ssid"] = None
-    fake_api.context["wifi_state"] = None
+    fake_api.status["wifi_ssid"] = None
+    fake_api.status["wifi_state"] = None
     await setup_integration(options={"wifi_ssid": "Other"})
     ssid = hass.states.get(f"sensor.{PREFIX}_wifi_ssid")
     assert ssid.state == "Other"
@@ -184,7 +223,7 @@ async def test_solar_sensors_appear_when_base_reports_solar_later(
 ):
     entry = await setup_integration()
     assert hass.states.get(f"sensor.{PREFIX}_solar_power") is None
-    fake_api.context["power_from_solar_kw"] = 2.5
+    fake_api.snapshot["power_flow"]["from_solar_kw"] = 2.5
     entry.runtime_data._poll.location["has_solar"] = True
     await entry.runtime_data.async_poll_grid_status()
     await hass.async_block_till_done()
@@ -201,7 +240,7 @@ async def test_fast_polls_do_not_overlap(hass, setup_integration, fake_api):
     assert fake_api.calls == []
     coordinator._fast_poll_running = False
     await coordinator.async_poll_grid_status()
-    assert "get_service_context" in fake_api.calls
+    assert "get_service_status" in fake_api.calls
     assert coordinator._fast_poll_running is False
 
 
@@ -271,7 +310,7 @@ async def test_daily_totals_are_fetched_with_the_slow_tier(hass, setup_integrati
 
 async def test_voltage_falls_back_to_the_newer_call(hass, setup_integration, fake_api):
     entry = await setup_integration()
-    fake_api.fail = {"get_grid_status"}
+    fake_api.fail = {"get_service_status"}
     await entry.runtime_data.async_poll_grid_status()
     await hass.async_block_till_done()
     grid = hass.states.get(f"binary_sensor.{PREFIX}_grid_power")
@@ -286,7 +325,7 @@ async def test_a_missed_grid_poll_is_unknown_not_the_last_reading(hass, setup_in
     clock = {"t": coordinator._monotonic()}
     coordinator._monotonic = lambda: clock["t"]
     await coordinator.async_poll_grid_status()
-    fake_api.fail = {"get_grid_status", "get_recent_grid_voltage", "get_service_context"}
+    fake_api.fail = {"get_service_status", "get_recent_grid_voltage", "get_battery_snapshot"}
     clock["t"] += 60
     await coordinator.async_poll_grid_status()
     await hass.async_block_till_done()
@@ -306,7 +345,7 @@ async def test_a_missed_grid_poll_is_unknown_not_the_last_reading(hass, setup_in
 
 async def test_an_outage_turns_grid_power_off(hass, setup_integration, fake_api):
     entry = await setup_integration()
-    fake_api.context["is_active_outage"] = True
+    fake_api.status["is_active_outage"] = True
     fake_api.snapshot["state"] = "outage"
     await entry.runtime_data.async_poll_grid_status()
     await hass.async_block_till_done()

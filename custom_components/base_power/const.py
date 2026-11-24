@@ -66,12 +66,14 @@ HARDWARE_SKU_CAPACITY: dict[str, tuple[int, float]] = {
     "BASE1_DUAL": (2, 78.4),
 }
 # Battery models from the site's location, used when the SKU is missing.
-# Only GEN1 is mapped: it matches the GRO SKUs. What GEN3 stands for is not
-# confirmed yet, so it falls back to the saved capacity.
+# GEN1 matches the GRO SKUs. GEN3 SINGLE is a Base Core, confirmed by an
+# owner with BASE1_SINGLE (issue #26). GEN3 DUAL is not confirmed yet, so
+# it falls back to the other sources.
 BATTERY_MODEL_CAPACITY: dict[tuple[str, str], tuple[int, float]] = {
     ("GEN1", "SINGLE"): (1, 25),
     ("GEN1", "DUAL"): (2, 50),
     ("GEN1", "WALL"): (1, 20),
+    ("GEN3", "SINGLE"): (1, 39.2),
 }
 
 
@@ -186,6 +188,19 @@ CHARGING_HOLD_SECONDS = 3 * 3600
 # A rise back to the level the charge just fell from is rounding, not
 # charging, when it comes within this long of the fall.
 CHARGING_BOUNCE_SECONDS = 3600
+# Live battery power at or below minus this many kW means charging. Base
+# reports it in 0.1 kW steps, so one step of -0.1 kW counts as noise.
+CHARGING_STORAGE_KW = 0.15
+# Base keeps this much of the battery in reserve. Its 750 W backup time
+# covers the rest: hours x 0.75 kW = (percent - 10) x nameplate kWh. Fits
+# the retired service context's percent to within rounding (issue #29).
+BACKUP_RESERVE_PERCENT = 10.0
+# The daily overview's backup samples are used for 750 W backup time and the
+# battery percent while the newest one is at most this old.
+BACKUP_SERIES_MAX_AGE_SECONDS = 2 * 3600
+# Solar to Home today at or above this many kWh means the site has solar.
+# Some sites without panels report 0.0001 kWh every hour (issue #26).
+SOLAR_DETECT_KWH = 0.05
 # A missed ServiceContext reuses the last good one for this long, so one
 # failed 60-second call does not blank the live sensors.
 CONTEXT_HOLD_SECONDS = 3 * 60

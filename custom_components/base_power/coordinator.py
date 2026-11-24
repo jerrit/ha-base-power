@@ -19,16 +19,19 @@ from .api_v2 import (
     GRID_SUPPORT_STORAGE_KW,
     OFF_GRID_STATES,
     empty_snapshot,
+    fill_context_from_snapshot,
     grid_support_active,
     live_grid_support,
 )
 from .auth import AuthenticationError, BasePowerAuth
-from .capacity import CapacityEstimate, nearest_system
+from .capacity import CapacityEstimate, estimate_battery_percent, nearest_system
 from .const import (
+    BACKUP_SERIES_MAX_AGE_SECONDS,
     BATTERY_CAPACITY_PER_UNIT_KWH,
     CHARGING_BOUNCE_SECONDS,
     CHARGING_FIRST_HOLD_SECONDS,
     CHARGING_HOLD_SECONDS,
+    CHARGING_STORAGE_KW,
     CONF_BATTERY_CAPACITY,
     CONF_BATTERY_COUNT,
     CONF_WIFI_SSID,
@@ -37,6 +40,7 @@ from .const import (
     HARDWARE_SKU_CAPACITY,
     NAMEPLATE_MATCH_TOLERANCE,
     SCAN_INTERVAL_SECONDS,
+    SOLAR_DETECT_KWH,
     STORAGE_VERSION,
     USAGE_STALE_AFTER_FAILURES,
     battery_model_capacity,
@@ -45,7 +49,6 @@ from .const import (
     totals_store_key,
 )
 from .poll import (
-    SNAPSHOT_EVERY_FAST_POLLS,
     PollState,
     include_fast_on_coordinator_refresh,
     refresh_slow,
@@ -80,6 +83,8 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # The level the charge last fell from, and when
     _fell_from: float | None = None
     _fell_at: float | None = None
+    # True while live battery power shows a charge
+    _power_charging = False
     # Unmapped hardware already logged, so the warning shows once
     _warned_hardware: str | None = None
 
@@ -109,7 +114,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._prev_soc: float | None = None
         self._snapshot: dict[str, Any] = empty_snapshot()
-        self._polls_since_snapshot = 0
         self._totals = EnergyTotals()
         self._totals_store: Store | None = None
         self._capacity_estimate = CapacityEstimate()
@@ -163,8 +167,8 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Refresh the usage tier, and the slow tier when it is due.
 
-        ServiceContext and GridStatus are the 60-second poll. This refresh
-        does not call them again after startup.
+        ServiceStatus and the battery snapshot are the 60-second poll. This
+        refresh does not call them again after startup.
         """
         first = self.data is None
         try:
@@ -186,7 +190,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if include_fast_on_coordinator_refresh(first):
                 self._grid = await self._async_fetch_grid(self._poll.numeric_id)
                 self._sample_capacity()
-                self._snapshot = await self._async_fetch_snapshot()
             return self._compose()
         except AuthenticationError as err:
             raise ConfigEntryAuthFailed from err
@@ -243,24 +246,37 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _async_fetch_grid(self, numeric_id: int | None) -> dict[str, Any]:
-        """Read service context and grid voltage for the numeric location id."""
-        context = self.api._empty_service_context()
+        """Read the live readings and refresh the snapshot.
+
+        Base retired MobileGetServiceContext and MobileGetGridStatus on
+        2026-11-24. GetServiceStatus (numeric id) now gives voltage, the
+        outage flag, and the gateway link. The v2 snapshot (address id)
+        gives power flow, backup time, Wi-Fi, and the battery percent while
+        off grid. The v2 voltage series covers a missing GetServiceStatus,
+        so a site without a numeric id still gets Grid Power.
+        """
+        self._snapshot = await self._async_fetch_snapshot()
+        status = self.api._parse_service_status(b"")
+        if numeric_id:
+            try:
+                status = await self.api.get_service_status(numeric_id)
+            except AuthenticationError:
+                raise
+            except Exception as err:
+                _LOGGER.debug("ServiceStatus fetch failed: %s", err)
+        else:
+            _LOGGER.debug("No numeric service location id; using the v2 calls only")
+        context = self._hold_context(fill_context_from_snapshot(status, self._snapshot))
         voltage = self.api._empty_grid_voltage()
-        if not numeric_id:
-            _LOGGER.debug("No numeric service location id yet")
-            return self.api.combine_grid_telemetry(context, voltage)
-        try:
-            context = await self.api.get_service_context(numeric_id)
-        except Exception as err:
-            _LOGGER.debug("ServiceContext fetch failed: %s", err)
-        context = self._hold_context(context)
         source: str | None = None
-        try:
-            voltage = await self.api.get_grid_status(numeric_id)
-        except Exception as err:
-            _LOGGER.debug("GridStatus fetch failed: %s", err)
-        if voltage.get("voltage_volts") is not None:
-            source = "legacy"
+        if status.get("voltage_volts") is not None:
+            voltage = {
+                "available": True,
+                "has_gateway": status.get("has_gateway"),
+                "voltage_volts": status["voltage_volts"],
+                "voltage_samples": 1,
+            }
+            source = "service_status"
         else:
             # Fallback: the v2 voltage series. It takes the address string.
             try:
@@ -308,25 +324,6 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return self._last_context
         return context
 
-    def _snapshot_due(self) -> bool:
-        """Every 10th poll, or every poll while something points to an outage.
-
-        A failed snapshot does not speed this up, so an outage of the v2 API
-        does not add a call every minute.
-        """
-        grid = self._grid
-        # home_has_power is not a trigger. The service-context parser reads a
-        # missing field as False, so an account that never sends it would
-        # poll the snapshot every minute. The snapshot's own no_home_power
-        # state still speeds this up.
-        if (
-            grid.get("is_active_outage")
-            or grid.get("grid_is_up") is False
-            or self._snapshot.get("state") in OFF_GRID_STATES
-        ):
-            return True
-        return self._polls_since_snapshot >= SNAPSHOT_EVERY_FAST_POLLS
-
     async def _async_fetch_snapshot(self) -> dict[str, Any]:
         """Battery snapshot. A failed call is empty, not the previous state.
 
@@ -340,12 +337,25 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("BatterySnapshot fetch failed: %s", err)
             return empty_snapshot()
 
-    def _apply_live_readings(self, derived: dict[str, Any], grid: dict[str, Any]) -> None:
-        """Apply state of charge, backup hours, home load, and charging."""
+    def _apply_live_readings(
+        self,
+        derived: dict[str, Any],
+        grid: dict[str, Any],
+        backup_750w: float | None = None,
+    ) -> None:
+        """Apply state of charge, backup hours, home load, and charging.
+
+        Base sends the battery percent only while off grid. On grid it is
+        estimated from the 750 W backup time (see estimate_battery_percent).
+        """
         soc = grid.get("battery_soc_percent")
+        estimate = estimate_battery_percent(backup_750w, derived.get("capacity_kwh"))
         if soc is not None:
             derived["battery_percent"] = round(float(soc), 1)
-            derived["battery_percent_source"] = "service_context"
+            derived["battery_percent_source"] = "snapshot"
+        elif estimate is not None:
+            derived["battery_percent"] = estimate
+            derived["battery_percent_source"] = "backup_hours_estimate"
         else:
             derived["battery_percent"] = None
             derived["battery_percent_source"] = None
@@ -366,20 +376,38 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _charging_state(self, percent: float | None, storage_kw: Any) -> bool | None:
         """Whether the battery is charging.
 
-        Base reports the charge as a whole percent, so one poll to the next
-        rarely differs. A rise means charging, and that holds for a while:
-        an hour after a single rise, or twice the time between the last two
-        rises (up to CHARGING_HOLD_SECONDS) once the pace is known. A slow
-        charge can take hours per percent.
+        Live battery power comes first: power going into the battery means
+        charging, even at 99 or 100%. When it stops, so does Battery Charging.
+
+        Without it, the charge percent decides. Base reports it as a whole
+        percent, so one poll to the next rarely differs. A rise means
+        charging, and that holds for a while: an hour after a single rise, or
+        twice the time between the last two rises (up to
+        CHARGING_HOLD_SECONDS) once the pace is known. A slow charge can take
+        hours per percent, and may not show in the power reading at all.
 
         A rise back to the level the charge just fell from is rounding, not
         charging, so a battery idling at its reserve does not flick on. A
         fall, a full battery, or the battery powering the home means not
-        charging. Unknown until the charge has moved once.
+        charging. A power reading without a charge means not charging too.
+        Unknown only when there is no power reading and the charge has not
+        moved yet.
         """
+        storage = (
+            float(storage_kw)
+            if isinstance(storage_kw, (int, float))
+            and not isinstance(storage_kw, bool)
+            and math.isfinite(storage_kw)
+            else None
+        )
+        power_charging = storage is not None and storage <= -CHARGING_STORAGE_KW
         if percent is None:
             self._prev_soc = None
-            return None
+            self._power_charging = power_charging
+            if power_charging:
+                return True
+            # A power reading that shows no charge means off (issue #26).
+            return False if storage is not None else None
         now = self._monotonic()
         if self._prev_soc is not None:
             delta = percent - self._prev_soc
@@ -410,18 +438,25 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._fell_from = self._prev_soc
                 self._fell_at = now
         self._prev_soc = percent
-        discharging = (
-            isinstance(storage_kw, (int, float))
-            and not isinstance(storage_kw, bool)
-            and math.isfinite(storage_kw)
-            and storage_kw >= GRID_SUPPORT_STORAGE_KW
-        )
+        if power_charging:
+            self._power_charging = True
+            return True
+        if self._power_charging and storage is not None:
+            # Live power showed a charge and now shows it stopped.
+            self._power_charging = False
+            self._charging = False
+        discharging = storage is not None and storage >= GRID_SUPPORT_STORAGE_KW
         if percent >= 99.5 or discharging or (
             self._charging
             and self._charge_rose_at is not None
             and now - self._charge_rose_at > self._charge_hold
         ):
             self._charging = False
+        if self._charging is None and storage is not None:
+            # No direction seen yet, but live power shows no charge. An idle
+            # battery can sit at one level for days; show off, not unknown.
+            # A later rise still turns it on. (issue #26)
+            return False
         return self._charging
 
     def _warn_unknown_hardware(
@@ -522,6 +557,30 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "estimated_capacity_kwh": estimate[1] if estimate else None,
         }
 
+    @staticmethod
+    def _backup_750w(
+        grid: dict[str, Any], snapshot: dict[str, Any], overview: dict[str, Any]
+    ) -> tuple[float | None, str | None]:
+        """Backup hours at 750 W, and where they came from.
+
+        On grid, the daily overview's newest 15-minute sample wins while it
+        is under 2 hours old. It matches the Base app and the retired
+        service context; the snapshot reads about 4% higher (issue #29).
+        Off grid, the live snapshot wins, since the overview lags.
+        """
+        latest = (overview or {}).get("backup_latest")
+        off_grid = snapshot.get("state") in OFF_GRID_STATES
+        if (
+            latest
+            and not off_grid
+            and time.time() - latest["timestamp"] <= BACKUP_SERIES_MAX_AGE_SECONDS
+        ):
+            return latest["backup_hours_750w"], "overview"
+        live = grid.get("backup_hours_750w")
+        if live is None:
+            live = snapshot.get("backup_hours_750w")
+        return live, ("snapshot" if live is not None else None)
+
     def _compose(self) -> dict[str, Any]:
         """Build coordinator data from the cached tiers and the latest grid."""
         dashboard = dict(self._poll.dashboard)
@@ -553,13 +612,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             energy["battery_to_home_kwh"] = 0.0
         derived = self._derive_values(dashboard, usage, self._time_zone())
-        self._apply_live_readings(derived, grid)
-        # The service context has the 750 W estimate every minute. The
-        # snapshot has it every 10 minutes and covers a missing context.
-        backup_750w = grid.get("backup_hours_750w")
-        if backup_750w is None:
-            backup_750w = snapshot.get("backup_hours_750w")
+        backup_750w, derived["backup_hours_750w_source"] = self._backup_750w(
+            grid, snapshot, overview
+        )
         derived["backup_hours_750w"] = backup_750w
+        self._apply_live_readings(derived, grid, backup_750w)
         wifi = resolve_wifi(
             self._poll.wifi,
             grid.get("wifi_ssid"),
@@ -586,7 +643,9 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             derived["self_sufficiency_percent"] = 0.0
         else:
             derived["self_sufficiency_percent"] = None
-        if not dashboard.get("has_solar") and (solar_kwh > 0 or location.get("has_solar")):
+        if not dashboard.get("has_solar") and (
+            solar_kwh >= SOLAR_DETECT_KWH or location.get("has_solar")
+        ):
             dashboard["has_solar"] = True
         totals = self._totals
         derived["home_usage_total_kwh"] = round(totals.home_kwh, 3) if totals.started else None
@@ -634,7 +693,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def async_poll_grid_status(self, now=None) -> None:
-        """ServiceContext and GridStatus. This is the only periodic caller."""
+        """ServiceStatus and the battery snapshot. The only periodic caller."""
         if self.data is None:
             return
         # A slow reply must not pile up polls behind it. Skip this one.
@@ -647,17 +706,11 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             moment = self._monotonic()
             if self._poll.numeric_id is None and self._poll.slow_due(moment, first=False):
                 await self._async_refresh_slow(moment)
-            if self._poll.numeric_id is None:
-                _LOGGER.debug("Fast poll skipped; numeric service location id is missing")
-                return
-            # An empty grid poll stays unknown. Do not keep the previous
-            # "grid is up" reading across a miss.
+            # The v2 calls take the address id, so a missing numeric id no
+            # longer stops the poll. An empty grid poll stays unknown. Do not
+            # keep the previous "grid is up" reading across a miss.
             self._grid = await self._async_fetch_grid(self._poll.numeric_id)
             self._sample_capacity()
-            self._polls_since_snapshot += 1
-            if self._snapshot_due():
-                self._snapshot = await self._async_fetch_snapshot()
-                self._polls_since_snapshot = 0
             # Do not use async_set_updated_data here. It restarts the
             # 15-minute refresh timer, and a 60-second poll would keep
             # pushing the usage refresh back so it never runs (issue #13).
