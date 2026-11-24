@@ -72,35 +72,40 @@ class FakeApi(BasePowerApiClient):
                 {"start": hour, "home_kwh": 0.5, "solar_kwh": 0.0},
             ],
         }
-        self.context = {
-            **self._empty_service_context(),
+        # GetServiceStatus, in the service context shape
+        self.status = {
+            **self._parse_service_status(b""),
             "available": True,
             "has_gateway": True,
             "gateway_connected": True,
             "is_active_outage": False,
-            "home_has_power": True,
-            "state_of_energy_raw": 87,
-            "available_backup_hours": 20.5,
-            "available_backup_hours_750w": 30.0,
             "wifi_ssid": "HomeNet",
             "wifi_state": "connected",
-            "power_from_grid_kw": 0.8,
-            "power_from_storage_kw": 0.0,
-            "power_from_solar_kw": 0.0,
-            "power_to_home_kw": 0.8,
+            "voltage_volts": 244.2,
+            "energy_bars": 4,
         }
+        # v2 GetRecentGridVoltage, used when ServiceStatus has no voltage
         self.voltage = {
             **self._empty_grid_voltage(),
             "available": True,
-            "has_gateway": True,
+            "has_gateway": None,
             "voltage_volts": 244.2,
             "voltage_samples": 150,
         }
+        # 25 h at 750 W on a 25 kWh battery: 10% + 25 x 0.75 / 25 = 85%
         self.snapshot = {
             **api_v2.empty_snapshot(),
             "available": True,
             "state": "on_grid",
-            "backup_hours_750w": 29.0,
+            "backup_hours": 20.5,
+            "backup_hours_750w": 25.0,
+            "power_flow": {
+                "from_grid_kw": 0.8,
+                "from_storage_kw": 0.0,
+                "from_solar_kw": 0.0,
+                "non_solar_to_home_kw": 0.8,
+                "to_home_kw": 0.8,
+            },
         }
         self.energy_account = {**api_v2.empty_energy_account(), "last_bill_amount_cents": 18853}
         self.billing_cycle = {**api_v2.empty_billing_cycle(), "net_accrued_cents": 500}
@@ -116,8 +121,10 @@ class FakeApi(BasePowerApiClient):
     async def get_dashboard_root(self, address):
         return await self._hit("get_dashboard_root", dict(self.dashboard))
 
-    async def get_wifi_metrics(self, address):
-        return await self._hit("get_wifi_metrics", {**self.wifi, "scan": dict(self.wifi["scan"])})
+    async def get_battery_wifi_networks(self, address):
+        return await self._hit(
+            "get_battery_wifi_networks", {**self.wifi, "scan": dict(self.wifi["scan"])}
+        )
 
     async def get_billing_metadata(self, address):
         return await self._hit(
@@ -162,17 +169,17 @@ class FakeApi(BasePowerApiClient):
             {"grid_to_home_kwh": None, "solar_to_home_kwh": None, "battery_to_home_kwh": None},
         )
 
-    async def get_service_context(self, numeric_id):
-        return await self._hit("get_service_context", dict(self.context))
-
-    async def get_grid_status(self, numeric_id):
-        return await self._hit("get_grid_status", dict(self.voltage))
+    async def get_service_status(self, numeric_id):
+        return await self._hit("get_service_status", dict(self.status))
 
     async def get_recent_grid_voltage(self, address):
         return await self._hit("get_recent_grid_voltage", dict(self.voltage))
 
     async def get_battery_snapshot(self, address):
-        return await self._hit("get_battery_snapshot", dict(self.snapshot))
+        snapshot = dict(self.snapshot)
+        if snapshot.get("power_flow") is not None:
+            snapshot["power_flow"] = dict(snapshot["power_flow"])
+        return await self._hit("get_battery_snapshot", snapshot)
 
 
 class FakeAuth:

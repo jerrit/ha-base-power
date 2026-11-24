@@ -41,12 +41,12 @@ class RecordingApi:
 
     async def get_dashboard_root(self, address):
         return await self._hit(
-            "MobileGetDashboardRoot",
+            "GetDashboardRoot",
             {"service_location_id": 7, "battery_count": 1, "has_solar": False},
         )
 
-    async def get_wifi_metrics(self, address):
-        return await self._hit("MobileGetWifiMetrics", {"scan": {"Home": 40}})
+    async def get_battery_wifi_networks(self, address):
+        return await self._hit("ListWifiNetworks", {"scan": {"Home": 40}})
 
     async def get_billing_metadata(self, address):
         return await self._hit("MobileGetBillingMetadata", {"amount_cents": 10, "last_bill_cents": None})
@@ -66,11 +66,11 @@ class RecordingApi:
             {"grid_to_home_kwh": 4.0, "solar_to_home_kwh": 0.0, "battery_to_home_kwh": None},
         )
 
-    async def get_service_context(self, numeric_id):
-        return await self._hit("MobileGetServiceContext", {"power_from_grid_kw": 1.3})
+    async def get_service_status(self, numeric_id):
+        return await self._hit("GetServiceStatus", {"voltage_volts": 245.0})
 
-    async def get_grid_status(self, numeric_id):
-        return await self._hit("MobileGetGridStatus", {"voltage_volts": 245.0})
+    async def get_battery_snapshot(self, address):
+        return await self._hit("GetSnapshot", {"available": True, "state": "on_grid"})
 
     async def get_daily_overview(self, address, time_zone=None):
         return await self._hit(
@@ -117,14 +117,13 @@ class RecordingApi:
 def test_steady_state_is_under_135_calls_per_hour():
     per_hour = _poll.steady_state_calls_per_hour()
     fast = (3600 / GRID_SCAN_INTERVAL_SECONDS) * len(FAST_METHODS)
-    snapshot = 3600 / GRID_SCAN_INTERVAL_SECONDS / _poll.SNAPSHOT_EVERY_FAST_POLLS
     usage = (3600 / USAGE_SCAN_INTERVAL_SECONDS) * len(USAGE_METHODS)
     slow = (3600 / SLOW_SCAN_INTERVAL_SECONDS) * len(SLOW_METHODS)
+    # ServiceStatus and the snapshot, every minute
     assert fast == 120
-    assert snapshot == 6
     assert usage == 4
-    assert abs(slow - 10 / 6) < 1e-9
-    assert per_hour == fast + snapshot + usage + slow
+    assert abs(slow - 8 / 6) < 1e-9
+    assert per_hour == fast + usage + slow
     assert per_hour < 135
     # The previous schedule was a 5-minute 8-call refresh plus the 60-second pair.
     previous = (3600 / 300) * 8 + (3600 / 60) * 2
@@ -174,13 +173,8 @@ def test_one_hour_after_startup_matches_the_tier_counts():
     assert fast_ticks == 60
     assert usage_ticks == 4
     assert slow_ticks == 0
-    snapshot_ticks = fast_ticks // _poll.SNAPSHOT_EVERY_FAST_POLLS
-    calls = (
-        fast_ticks * len(FAST_METHODS)
-        + snapshot_ticks * len(_poll.SNAPSHOT_METHODS)
-        + usage_ticks * len(USAGE_METHODS)
-    )
-    assert calls == 130
+    calls = fast_ticks * len(FAST_METHODS) + usage_ticks * len(USAGE_METHODS)
+    assert calls == 124
 
 
 def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
@@ -196,14 +190,17 @@ def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
     state.wifi = {"scan": {"Home": 10}, "ssid": "Home", "signal": 10, "connected": True}
 
     api = RecordingApi(
-        fail=set(SLOW_METHODS) | set(USAGE_METHODS) | set(_poll.USAGE_FALLBACK_METHODS)
+        fail=set(SLOW_METHODS)
+        | set(USAGE_METHODS)
+        | set(_poll.USAGE_FALLBACK_METHODS)
+        | {"MobileGetBillingMetadata", "MobileGetUsageCycles"}
     )
 
     async def check() -> None:
         await refresh_slow(api, state, "loc-1", "Home", now=0)
         await refresh_usage(api, state, "loc-1", "UTC")
-        await api.get_service_context(state.numeric_id)
-        await api.get_grid_status(state.numeric_id)
+        await api.get_service_status(state.numeric_id)
+        await api.get_battery_snapshot("loc-1")
 
     _run(check())
     assert state.numeric_id == 9
@@ -212,7 +209,7 @@ def test_failed_slow_tier_keeps_cache_and_does_not_block_fast_calls():
     assert state.billing["amount_cents"] == 100
     assert state.wifi["ssid"] == "Home"
     assert state.location["available"] is False
-    assert api.calls[-2:] == ["MobileGetServiceContext", "MobileGetGridStatus"]
+    assert api.calls[-2:] == ["GetServiceStatus", "GetSnapshot"]
 
 
 def test_successful_usage_refresh_does_not_call_grid_and_keeps_wifi():

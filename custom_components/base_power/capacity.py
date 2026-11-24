@@ -19,6 +19,7 @@ from collections import deque
 from typing import Any
 
 from .const import (
+    BACKUP_RESERVE_PERCENT,
     BATTERY_CAPACITY_OPTIONS,
     ESTIMATE_LOAD_KW,
     ESTIMATE_MIN_SAMPLES,
@@ -37,6 +38,21 @@ def _number(value: Any) -> float | None:
         return None
     value = float(value)
     return value if math.isfinite(value) else None
+
+
+def estimate_battery_percent(backup_750w: Any, capacity_kwh: Any) -> float | None:
+    """Battery percent from Base's 750 W backup time and the nameplate size.
+
+    hours x 0.75 kW is the energy left above Base's 10% reserve. None when
+    either number is missing. Kept to 0-100, so a wrong capacity setting
+    cannot show more than full.
+    """
+    hours = _number(backup_750w)
+    capacity = _number(capacity_kwh)
+    if hours is None or capacity is None or hours < 0 or capacity <= 0:
+        return None
+    percent = BACKUP_RESERVE_PERCENT + hours * ESTIMATE_LOAD_KW / capacity * 100
+    return round(min(100.0, max(0.0, percent)), 1)
 
 
 def nearest_system(

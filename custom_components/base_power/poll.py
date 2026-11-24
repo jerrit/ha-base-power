@@ -39,18 +39,16 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-FAST_METHODS = ("MobileGetServiceContext", "MobileGetGridStatus")
-SNAPSHOT_METHODS = ("GetSnapshot",)
-# While everything looks normal the snapshot runs on every Nth 60-second poll.
-SNAPSHOT_EVERY_FAST_POLLS = 10
+# The 60-second poll. Base retired MobileGetServiceContext and
+# MobileGetGridStatus on 2026-11-24; these two replace them.
+FAST_METHODS = ("GetServiceStatus", "GetSnapshot")
 USAGE_METHODS = ("GetDailyOverview",)
-# Called only when the overview fails or is missing that data.
+# Called only when the overview fails or is missing that data. Base has
+# retired both, so after the first "unknown method" they are skipped.
 USAGE_FALLBACK_METHODS = ("MobileGetRecentUsage", "MobileGetUsageEnergy")
 SLOW_METHODS = (
-    "MobileGetDashboardRoot",
-    "MobileGetWifiMetrics",
-    "MobileGetBillingMetadata",
-    "MobileGetUsageCycles",
+    "GetDashboardRoot",
+    "ListWifiNetworks",
     "GetCurrentBillingCycle",
     "GetAccount",
     "ListAccounts",
@@ -63,7 +61,7 @@ SLOW_METHODS = (
 def include_fast_on_coordinator_refresh(first: bool) -> bool:
     """The first refresh fills grid data before the 60-second timer starts.
 
-    Later coordinator ticks do not call ServiceContext or GridStatus.
+    Later coordinator ticks do not call ServiceStatus or the snapshot.
     """
     return first
 
@@ -71,12 +69,9 @@ def include_fast_on_coordinator_refresh(first: bool) -> bool:
 def steady_state_calls_per_hour() -> float:
     """Average API calls in one hour after startup."""
     fast = (3600 / GRID_SCAN_INTERVAL_SECONDS) * len(FAST_METHODS)
-    snapshot = (3600 / GRID_SCAN_INTERVAL_SECONDS / SNAPSHOT_EVERY_FAST_POLLS) * len(
-        SNAPSHOT_METHODS
-    )
     usage = (3600 / USAGE_SCAN_INTERVAL_SECONDS) * len(USAGE_METHODS)
     slow = (3600 / SLOW_SCAN_INTERVAL_SECONDS) * len(SLOW_METHODS)
-    return fast + snapshot + usage + slow
+    return fast + usage + slow
 
 
 def _empty_energy() -> dict[str, Any]:
@@ -253,9 +248,12 @@ async def refresh_slow(
         numeric_id = dashboard.get("service_location_id") if dashboard else None
         if numeric_id:
             state.numeric_id = numeric_id
+        # Keep solar, time zone, and status even without a numeric id. The
+        # live poll no longer needs the id.
+        if numeric_id or (dashboard and (dashboard.get("time_zone") or dashboard.get("battery_status"))):
             state.dashboard = dashboard
 
-    wifi = await fetch("WifiMetrics", lambda: api.get_wifi_metrics(address_id))
+    wifi = await fetch("WifiNetworks", lambda: api.get_battery_wifi_networks(address_id))
     if wifi is not _FAILED:
         if wifi and wifi.get("scan"):
             state.wifi = apply_wifi_preference(wifi, preferred_ssid)

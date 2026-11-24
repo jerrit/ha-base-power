@@ -32,14 +32,21 @@ def _polls(coordinator, percents, storage_kw=0.0, step=60.0):
     return states
 
 
-def test_unknown_until_the_charge_moves(coordinator):
-    assert _polls(coordinator, [80.0, 80.0, 80.0]) == [None, None, None]
+def test_unknown_until_the_charge_moves_without_a_power_reading(coordinator):
+    assert _polls(coordinator, [80.0, 80.0, 80.0], storage_kw=None) == [None, None, None]
+
+
+def test_an_idle_battery_reads_off_not_unknown(coordinator):
+    # Issue #26: a battery sitting at 95% on grid read unknown for days.
+    assert _polls(coordinator, [95.0, 95.0, 95.0]) == [False, False, False]
+    # A rise still turns it on.
+    assert _polls(coordinator, [96.0]) == [True]
 
 
 def test_a_rise_holds_through_the_flat_polls_that_follow(coordinator):
     # 80 -> 81, then an hour of 81. The old logic went unknown after one poll.
     states = _polls(coordinator, [80.0, 81.0] + [81.0] * 60)
-    assert states[0] is None
+    assert states[0] is False
     assert all(state is True for state in states[1:])
 
 
@@ -72,9 +79,11 @@ def test_battery_powering_the_home_is_not_charging(coordinator):
     assert coordinator._charging_state(52.0, 0.1) is True
 
 
-def test_a_missed_reading_is_unknown_and_does_not_invent_a_change(coordinator):
+def test_a_missed_reading_does_not_invent_a_change(coordinator):
     _polls(coordinator, [50.0, 51.0])
-    assert coordinator._charging_state(None, 0.0) is None
+    assert coordinator._charging_state(None, None) is None
+    # Without a percent, a power reading with no charge still means off.
+    assert coordinator._charging_state(None, 0.0) is False
     # 51 -> (missing) -> 60 is not compared across the gap, but the hold remains.
     assert coordinator._charging_state(60.0, 0.0) is True
 
@@ -157,4 +166,5 @@ def test_a_tenth_of_a_kilowatt_in_is_noise(coordinator):
 
 def test_power_going_in_counts_without_a_percent(coordinator):
     assert coordinator._charging_state(None, -0.5) is True
-    assert coordinator._charging_state(None, 0.0) is None
+    assert coordinator._charging_state(None, 0.0) is False
+    assert coordinator._charging_state(None, None) is None
