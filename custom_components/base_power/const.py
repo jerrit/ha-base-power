@@ -167,6 +167,11 @@ def totals_store_key(entry_id: str) -> str:
     return f"base_power.{entry_id}.totals"
 
 
+def reserve_store_key(entry_id: str) -> str:
+    """Storage key for one config entry's learned battery reserve."""
+    return f"base_power.{entry_id}.reserve"
+
+
 # Hours already counted, kept this long so a late hour is counted once and a
 # finished day can be checked against Base's daily total.
 COUNTED_HOURS_KEEP_SECONDS = 40 * 86400
@@ -191,10 +196,24 @@ CHARGING_BOUNCE_SECONDS = 3600
 # Live battery power at or below minus this many kW means charging. Base
 # reports it in 0.1 kW steps, so one step of -0.1 kW counts as noise.
 CHARGING_STORAGE_KW = 0.15
-# Base keeps this much of the battery in reserve. Its 750 W backup time
-# covers the rest: hours x 0.75 kW = (percent - 10) x nameplate kWh. Fits
-# the retired service context's percent to within rounding (issue #29).
-BACKUP_RESERVE_PERCENT = 10.0
+# Base keeps about this much of the battery in reserve. Its 750 W backup
+# time covers the rest: hours x 0.75 kW = (percent - reserve) x nameplate
+# kWh. 6.4% fits an outage test from 98% down to 50% on a Base Core (issue
+# #29). Each install learns its own value while off grid, when Base sends
+# the real percent.
+BACKUP_RESERVE_PERCENT = 6.4
+# A learned reserve outside this range is a bad reading and is ignored.
+RESERVE_MIN_PERCENT = 0.0
+RESERVE_MAX_PERCENT = 20.0
+# Readings are taken only in this charge range. The top end bends a little
+# near full.
+RESERVE_MIN_SOC_PERCENT = 15.0
+RESERVE_MAX_SOC_PERCENT = 95.0
+# The learned reserve is used once it has this many readings. Base sends
+# whole percents, so one reading is off by up to half a point.
+RESERVE_MIN_SAMPLES = 10
+# The running average weighs the newest reading at least 1 in this many.
+RESERVE_AVERAGE_WINDOW = 200
 # The daily overview's backup samples are used for 750 W backup time and the
 # battery percent while the newest one is at most this old.
 BACKUP_SERIES_MAX_AGE_SECONDS = 2 * 3600

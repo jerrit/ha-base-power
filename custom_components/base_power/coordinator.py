@@ -24,7 +24,12 @@ from .api_v2 import (
     live_grid_support,
 )
 from .auth import AuthenticationError, BasePowerAuth
-from .capacity import CapacityEstimate, estimate_battery_percent, nearest_system
+from .capacity import (
+    CapacityEstimate,
+    ReserveEstimate,
+    estimate_battery_percent,
+    nearest_system,
+)
 from .const import (
     BACKUP_SERIES_MAX_AGE_SECONDS,
     BATTERY_CAPACITY_PER_UNIT_KWH,
@@ -45,6 +50,7 @@ from .const import (
     USAGE_STALE_AFTER_FAILURES,
     battery_model_capacity,
     battery_variant_count,
+    reserve_store_key,
     resolve_battery_capacity,
     totals_store_key,
 )
@@ -117,12 +123,45 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._totals = EnergyTotals()
         self._totals_store: Store | None = None
         self._capacity_estimate = CapacityEstimate()
+        self._reserve = ReserveEstimate()
+        self._reserve_store: Store | None = None
+        self._reserve_seen_at: Any = None
 
     async def async_load_totals(self) -> None:
         """Load the running energy totals saved before the last restart."""
         entry_id = getattr(self._config_entry, "entry_id", self.service_location_id)
         self._totals_store = Store(self.hass, STORAGE_VERSION, totals_store_key(entry_id))
         self._totals = EnergyTotals.from_dict(await self._totals_store.async_load())
+        self._reserve_store = Store(self.hass, STORAGE_VERSION, reserve_store_key(entry_id))
+        self._reserve = ReserveEstimate.from_dict(await self._reserve_store.async_load())
+
+    def _learn_reserve(
+        self, grid: dict[str, Any], snapshot: dict[str, Any], capacity_kwh: Any
+    ) -> None:
+        """Learn the battery reserve from a real off-grid percent.
+
+        Each snapshot is used once, since data is rebuilt more often than
+        Base sends a new one.
+        """
+        soc = grid.get("battery_soc_percent")
+        if soc is None or snapshot.get("state") not in OFF_GRID_STATES:
+            return
+        seen = snapshot.get("observed_at")
+        if seen is not None and seen == self._reserve_seen_at:
+            return
+        self._reserve_seen_at = seen
+        hours = grid.get("backup_hours_750w")
+        if hours is None:
+            hours = snapshot.get("backup_hours_750w")
+        was_learned = self._reserve.learned
+        if not self._reserve.add(soc, hours, capacity_kwh):
+            return
+        if self._reserve.learned and not was_learned:
+            _LOGGER.info(
+                "Learned this battery's reserve from an outage: %.1f%%", self._reserve.value
+            )
+        if self._reserve_store is not None:
+            self._reserve_store.async_delay_save(self._reserve.as_dict, 30)
 
     def _update_totals(self) -> None:
         """Add new hours from the overview and save when they change.
@@ -346,10 +385,13 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Apply state of charge, backup hours, home load, and charging.
 
         Base sends the battery percent only while off grid. On grid it is
-        estimated from the 750 W backup time (see estimate_battery_percent).
+        estimated from the 750 W backup time (see estimate_battery_percent),
+        with the reserve learned during outages.
         """
         soc = grid.get("battery_soc_percent")
-        estimate = estimate_battery_percent(backup_750w, derived.get("capacity_kwh"))
+        estimate = estimate_battery_percent(
+            backup_750w, derived.get("capacity_kwh"), self._reserve.value
+        )
         if soc is not None:
             derived["battery_percent"] = round(float(soc), 1)
             derived["battery_percent_source"] = "snapshot"
@@ -563,23 +605,21 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> tuple[float | None, str | None]:
         """Backup hours at 750 W, and where they came from.
 
-        On grid, the daily overview's newest 15-minute sample wins while it
-        is under 2 hours old. It matches the Base app and the retired
-        service context; the snapshot reads about 4% higher (issue #29).
-        Off grid, the live snapshot wins, since the overview lags.
+        The live snapshot wins. It updates every minute and now matches the
+        daily overview, which refreshes about hourly. Swapping between them
+        made Battery Level jump when the grid came back (issue #29). The
+        overview's newest 15-minute sample is used only while the snapshot
+        has nothing and the sample is under 2 hours old.
         """
-        latest = (overview or {}).get("backup_latest")
-        off_grid = snapshot.get("state") in OFF_GRID_STATES
-        if (
-            latest
-            and not off_grid
-            and time.time() - latest["timestamp"] <= BACKUP_SERIES_MAX_AGE_SECONDS
-        ):
-            return latest["backup_hours_750w"], "overview"
         live = grid.get("backup_hours_750w")
         if live is None:
             live = snapshot.get("backup_hours_750w")
-        return live, ("snapshot" if live is not None else None)
+        if live is not None:
+            return live, "snapshot"
+        latest = (overview or {}).get("backup_latest")
+        if latest and time.time() - latest["timestamp"] <= BACKUP_SERIES_MAX_AGE_SECONDS:
+            return latest["backup_hours_750w"], "overview"
+        return None, None
 
     def _compose(self) -> dict[str, Any]:
         """Build coordinator data from the cached tiers and the latest grid."""
@@ -616,6 +656,7 @@ class BasePowerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             grid, snapshot, overview
         )
         derived["backup_hours_750w"] = backup_750w
+        self._learn_reserve(grid, snapshot, derived.get("capacity_kwh"))
         self._apply_live_readings(derived, grid, backup_750w)
         wifi = resolve_wifi(
             self._poll.wifi,

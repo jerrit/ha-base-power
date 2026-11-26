@@ -60,6 +60,7 @@ async def async_get_config_entry_diagnostics(
             "daily_energy_days": len(poll.daily_energy),
         },
         "capacity_estimate": coordinator._capacity_estimate.as_diagnostics(),
+        "reserve_estimate": coordinator._reserve.as_diagnostics(),
         "totals": {
             "home_kwh": totals.home_kwh,
             "solar_kwh": totals.solar_kwh,

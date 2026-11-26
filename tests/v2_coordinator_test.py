@@ -68,6 +68,9 @@ def _compose(
             coordinator._totals = coordinator_mod.EnergyTotals()
             coordinator._totals_store = None
             coordinator._capacity_estimate = coordinator_mod.CapacityEstimate()
+            coordinator._reserve = coordinator_mod.ReserveEstimate()
+            coordinator._reserve_store = None
+            coordinator._reserve_seen_at = None
             coordinator._poll.energy = {
                 "grid_to_home_kwh": energy_grid,
                 "solar_to_home_kwh": energy_solar,
@@ -233,6 +236,9 @@ async def _coordinator(hass):
     coordinator._totals = coordinator_mod.EnergyTotals()
     coordinator._totals_store = None
     coordinator._capacity_estimate = coordinator_mod.CapacityEstimate()
+    coordinator._reserve = coordinator_mod.ReserveEstimate()
+    coordinator._reserve_store = None
+    coordinator._reserve_seen_at = None
     coordinator._poll.numeric_id = 7
     coordinator._poll.mark_slow(coordinator._monotonic())
     coordinator._grid = _grid(api, volts=245.0)
@@ -410,6 +416,9 @@ def _capacity(options, sku, batteries=None, hours=None, readings=(), home=None):
             coordinator._totals = coordinator_mod.EnergyTotals()
             coordinator._totals_store = None
             coordinator._capacity_estimate = coordinator_mod.CapacityEstimate()
+            coordinator._reserve = coordinator_mod.ReserveEstimate()
+            coordinator._reserve_store = None
+            coordinator._reserve_seen_at = None
             for soc, hours_750w in readings:
                 coordinator._capacity_estimate.add(soc, hours_750w)
             if home is not None:

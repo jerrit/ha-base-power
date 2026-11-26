@@ -6,7 +6,11 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.base_power.auth import AuthenticationError, AuthTemporaryError
-from custom_components.base_power.const import DOMAIN, USAGE_STALE_AFTER_FAILURES
+from custom_components.base_power.const import (
+    DOMAIN,
+    RESERVE_MIN_SAMPLES,
+    USAGE_STALE_AFTER_FAILURES,
+)
 from custom_components.base_power.diagnostics import async_get_config_entry_diagnostics
 
 PREFIX = "base_power_loc_1"
@@ -24,8 +28,8 @@ async def test_setup_creates_sensors_with_live_values(hass, setup_integration):
     assert entry.state is ConfigEntryState.LOADED
     assert _state(hass, "sensor", "grid_voltage") == "244.2"
     assert _state(hass, "sensor", "power_from_grid") == "800"
-    # Estimated from 25 h at 750 W on a 25 kWh battery
-    assert _state(hass, "sensor", "battery_level") == "85.0"
+    # Estimated from 25 h at 750 W on a 25 kWh battery: 6.4% + 75%
+    assert _state(hass, "sensor", "battery_level") == "81.4"
     assert hass.states.get(f"sensor.{PREFIX}_battery_level").attributes["source"] == (
         "backup_hours_estimate"
     )
@@ -42,9 +46,10 @@ async def test_setup_creates_sensors_with_live_values(hass, setup_integration):
     assert hass.states.get(f"sensor.{PREFIX}_solar_power") is None
 
 
-async def test_backup_at_750w_comes_from_the_overview_then_the_snapshot(
+async def test_backup_at_750w_comes_from_the_snapshot_then_the_overview(
     hass, setup_integration, fake_api
 ):
+    """Issue #29: the overview refreshes hourly, so the live snapshot wins."""
     import time
 
     fake_api.overview["backup_latest"] = {
@@ -53,15 +58,49 @@ async def test_backup_at_750w_comes_from_the_overview_then_the_snapshot(
         "backup_hours_750w": 24.0,
     }
     entry = await setup_integration()
-    # The overview matches the Base app, so it wins while fresh: 10% + 24 x 0.75 / 25
+    assert _state(hass, "sensor", "battery_backup_time_750_w_essentials") == "25.0"
+    assert _state(hass, "sensor", "battery_level") == "81.4"
+    # No 750 W time in the snapshot: the fresh overview sample fills in.
+    fake_api.snapshot["backup_hours_750w"] = None
+    await entry.runtime_data.async_poll_grid_status()
+    await hass.async_block_till_done()
     assert _state(hass, "sensor", "battery_backup_time_750_w_essentials") == "24.0"
-    assert _state(hass, "sensor", "battery_level") == "82.0"
-    # Older than 2 hours: the live snapshot takes over.
+    # 6.4% + 24 x 0.75 / 25
+    assert _state(hass, "sensor", "battery_level") == "78.4"
+    # An overview sample over 2 hours old is not used.
     fake_api.overview["backup_latest"]["timestamp"] = int(time.time()) - 3 * 3600
     entry.runtime_data._poll.overview = dict(fake_api.overview)
     await entry.runtime_data.async_poll_grid_status()
     await hass.async_block_till_done()
-    assert _state(hass, "sensor", "battery_backup_time_750_w_essentials") == "25.0"
+    assert _state(hass, "sensor", "battery_level") == "unknown"
+
+
+async def test_an_outage_teaches_the_reserve_used_on_grid(hass, setup_integration, fake_api):
+    entry = await setup_integration()
+    coordinator = entry.runtime_data
+    # Base's percent sits 8% above what the 750 W time covers on 25 kWh.
+    for i in range(RESERVE_MIN_SAMPLES):
+        soc = 70 - i
+        fake_api.snapshot.update(
+            state="outage",
+            observed_at=1_800_000_000 + 60 * i,
+            state_of_energy_percent=soc,
+            backup_hours_750w=(soc - 8) * 25 / 75,
+        )
+        await coordinator.async_poll_grid_status()
+        await hass.async_block_till_done()
+    assert coordinator._reserve.learned
+    assert coordinator._reserve.value == 8.0
+    # The same snapshot seen twice counts once.
+    await coordinator.async_poll_grid_status()
+    assert coordinator._reserve.samples == RESERVE_MIN_SAMPLES
+    # Back on grid: 8% + 25 x 0.75 / 25
+    fake_api.snapshot.update(state="on_grid", state_of_energy_percent=None, backup_hours_750w=25.0)
+    await coordinator.async_poll_grid_status()
+    await hass.async_block_till_done()
+    assert _state(hass, "sensor", "battery_level") == "83.0"
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["reserve_estimate"]["learned"] is True
 
 
 async def test_outage_snapshot_gives_the_exact_battery_percent(hass, setup_integration, fake_api):
@@ -83,7 +122,7 @@ async def test_live_poll_runs_without_a_numeric_site_id(hass, setup_integration,
     assert _state(hass, "sensor", "grid_voltage") == "244.2"
     assert _state(hass, "binary_sensor", "grid_power") == "on"
     assert _state(hass, "sensor", "power_from_grid") == "800"
-    assert _state(hass, "sensor", "battery_level") == "85.0"
+    assert _state(hass, "sensor", "battery_level") == "81.4"
 
 
 async def test_wifi_network_comes_from_base_not_the_saved_option(hass, setup_integration, fake_api):

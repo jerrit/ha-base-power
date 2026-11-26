@@ -26,6 +26,7 @@ from .const import (
     GRID_SCAN_INTERVAL_SECONDS,
     PLATFORMS,
     STORAGE_VERSION,
+    reserve_store_key,
     totals_store_key,
 )
 from .coordinator import BasePowerCoordinator
@@ -137,5 +138,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: BasePowerConfigEntry) -
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: BasePowerConfigEntry) -> None:
-    """Delete the saved energy totals when the integration is removed."""
+    """Delete the saved totals and learned reserve when the integration is removed."""
     await Store(hass, STORAGE_VERSION, totals_store_key(entry.entry_id)).async_remove()
+    await Store(hass, STORAGE_VERSION, reserve_store_key(entry.entry_id)).async_remove()
