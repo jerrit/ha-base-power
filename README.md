@@ -203,7 +203,7 @@ Home Usage Today and Solar to Home fill from today's hourly samples. Battery to 
 - **Fallbacks**: 15-minute usage and today's energy come from the newer daily overview. The older recent-usage and usage-energy calls run only when the overview fails or lacks that data. Grid voltage comes from `GetServiceStatus`, and the newer v2 voltage call fills in when it fails, returns nothing, or Base sends no numeric location id. Intervals Today shows `usage_source` and `energy_source`, and Grid Power shows `voltage_source` (`service_status` or `v2`)
 - **Battery**: detected from the SKU or battery model. When neither is known, Base's nameplate from `GetHome` is used if Base sends it, then an estimate from the 750 W backup time, then the Battery Capacity option: 20, 25, 39.2, 50, or 78.4 kWh
 - **Battery %**: `state_of_energy_percent` from the v2 battery snapshot while off grid. On grid, estimated from the 750 W backup time (below)
-- **Backup Time**: the v2 battery snapshot's hours at the current home load. At 750 W, the daily overview's newest 15-minute sample while it's under 2 hours old, since it matches the Base app; otherwise the snapshot, which reads about 4% higher. Off grid, always the snapshot
+- **Backup Time**: the v2 battery snapshot's hours, at the current home load and at 750 W. When the snapshot has no 750 W time, the daily overview's newest 15-minute sample fills in while it's under 2 hours old
 - **Live power**: `power_flow` from the v2 battery snapshot (grid, battery, solar, and home, in 0.1 kW steps)
 - **WiFi**: `gatewayWifi` from `GetServiceStatus`, or the snapshot's Wi-Fi, names the network the battery is on. The signal comes from v2 `ListWifiNetworks`
 - **Time zone**: Day totals use the site's time zone from Base, and Home Assistant's when Base sends none
@@ -220,7 +220,7 @@ Confirm the sensors below after restarting Home Assistant. A passing check with 
 
 - **Grid Power, grid up.** It should be **on**, with `voltage_volts` around the normal service voltage and `active_outage` false. Confirmed on the development account at about 245 V. The integration uses the numeric service location id from the dashboard. The address string still gets an empty body from these calls.
 - **Grid Power, during an outage.** Still needs a test. Cut grid power at the panel, leave the house on the battery, and force an update. The sensor turns **off** when Base sets the active-outage flag, and also when voltage falls below 50 V. The September test stayed **on** because the request used the address string and the body came back empty. A missing response stays **unknown**. The sensor does not keep the previous "grid is up" reading.
-- **Battery Level.** On grid this is an estimate from the 750 W backup time, with `source: backup_hours_estimate`. Compare with the Base app. It should be within about 1%, and up to an hour behind. During an outage it should switch to `source: snapshot`, the exact value.
+- **Battery Level.** On grid this is an estimate from the 750 W backup time, with `source: backup_hours_estimate`. It should update every minute. During an outage it should switch to `source: snapshot`, the exact value, and the reserve it learns shows in diagnostics under `reserve_estimate`.
 - **Battery Backup Time.** The snapshot's hours at the current load. It should move as the house load changes.
 - **Current Power.** The snapshot's live home load. Without one, the latest 15-minute sample is average kW, and watts are that value times 1000.
 - **Battery Charging while full.** A flat 100% reads off. Confirmed on the development account.
@@ -256,13 +256,21 @@ After a restart the estimate needs a few minutes of readings, so System Capacity
 
 ## Battery Level on grid
 
-Base stopped sending the battery percent while on grid when it retired its older API on 2026-11-24. It still sends the backup time at a steady 750 W, which is the energy left above Base's 10% reserve:
+Base stopped sending the battery percent while on grid when it retired its older API on 2026-11-24. It still sends the backup time at a steady 750 W, which is the energy left above a small reserve Base keeps:
 
-`percent = 10 + hours × 0.75 kW ÷ capacity kWh × 100`
+`percent = reserve + hours × 0.75 kW ÷ capacity kWh × 100`
 
-A Base Core owner checked this against the retired percent over a full charge from 17% to 100%, and it matched to within rounding (issue #29). It uses System Capacity, so a wrong capacity gives a wrong percent; it's capped at 100%. The 750 W time comes from the daily overview, in 15-minute steps, so Battery Level can be up to an hour behind the app. During an outage Base sends the exact percent again, and the sensor uses it.
+The reserve starts at 6.4%. A Base Core owner measured that by switching off the main breaker and comparing Base's exact percent with the 750 W time from 98% down to 50% (issue #29). During any outage the integration learns your own install's reserve the same way. It averages the readings between 15% and 95%, saves the result, and uses it once it has 10 readings. The diagnostics download shows it under `reserve_estimate`. Changing System Capacity starts the learning over.
+
+The 750 W time comes from the live battery snapshot, so Battery Level updates every minute. The daily overview's 15-minute sample is only a fallback. The estimate uses System Capacity, so a wrong capacity gives a wrong percent; it's capped at 100%. After a full charge it can settle just under 100% (about 98.4% on the Core in the test). During an outage Base sends the exact percent again, and the sensor uses it.
+
+Base's backup hours appear to be stored energy divided by load, with no allowance for discharge losses. Measured efficiency was about 92% each way, so real runtime is probably around 8% shorter than Backup Time shows.
 
 ## Changelog
+
+### v1.15.1
+- **Battery Level on grid** read 3 to 4 points high and capped at 100% near full. The reserve in the estimate drops from 10% to 6.4%, and each install learns its own during outages (issue #29).
+- **Battery Level** now follows the live snapshot every minute. It used the hourly overview first, which lagged during a refill (52% shown while the battery was about 72%) and jumped about 4 points when the grid came back, briefly turning Battery Charging on.
 
 ### v1.15.0
 - **Live sensors are back after Base retired its older API** on 2026-11-24 (issues #29, #30, #31). Battery Level, Battery Power, Power from Grid, Solar Power, Current Power, Backup Time, Battery Connected, Grid Voltage, and Grid Power read unknown. They now come from `GetServiceStatus` and the v2 battery snapshot. The live poll no longer stops when Base sends no numeric location id.

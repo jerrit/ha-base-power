@@ -27,6 +27,12 @@ from .const import (
     ESTIMATE_SAMPLES,
     ESTIMATE_SNAP_TOLERANCE,
     ESTIMATE_USABLE_FRACTION,
+    RESERVE_AVERAGE_WINDOW,
+    RESERVE_MAX_PERCENT,
+    RESERVE_MAX_SOC_PERCENT,
+    RESERVE_MIN_PERCENT,
+    RESERVE_MIN_SAMPLES,
+    RESERVE_MIN_SOC_PERCENT,
 )
 
 # Every size Base sells, as (units, nameplate kWh)
@@ -40,10 +46,12 @@ def _number(value: Any) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def estimate_battery_percent(backup_750w: Any, capacity_kwh: Any) -> float | None:
+def estimate_battery_percent(
+    backup_750w: Any, capacity_kwh: Any, reserve_percent: float = BACKUP_RESERVE_PERCENT
+) -> float | None:
     """Battery percent from Base's 750 W backup time and the nameplate size.
 
-    hours x 0.75 kW is the energy left above Base's 10% reserve. None when
+    hours x 0.75 kW is the energy left above Base's reserve. None when
     either number is missing. Kept to 0-100, so a wrong capacity setting
     cannot show more than full.
     """
@@ -51,8 +59,92 @@ def estimate_battery_percent(backup_750w: Any, capacity_kwh: Any) -> float | Non
     capacity = _number(capacity_kwh)
     if hours is None or capacity is None or hours < 0 or capacity <= 0:
         return None
-    percent = BACKUP_RESERVE_PERCENT + hours * ESTIMATE_LOAD_KW / capacity * 100
+    percent = reserve_percent + hours * ESTIMATE_LOAD_KW / capacity * 100
     return round(min(100.0, max(0.0, percent)), 1)
+
+
+class ReserveEstimate:
+    """The battery reserve for one install, learned while off grid.
+
+    Off grid, Base sends the real percent next to the 750 W backup time,
+    so reserve = percent - hours x 0.75 / capacity x 100. Readings are
+    averaged and saved. Until there are enough, the default is used. A
+    change of capacity starts over, since the readings depend on it.
+    """
+
+    def __init__(
+        self, percent: float | None = None, samples: int = 0, capacity_kwh: float | None = None
+    ) -> None:
+        self.percent = percent
+        self.samples = samples
+        self.capacity_kwh = capacity_kwh
+
+    @property
+    def value(self) -> float:
+        """The learned reserve, or the default until it has enough readings."""
+        if self.percent is None or self.samples < RESERVE_MIN_SAMPLES:
+            return BACKUP_RESERVE_PERCENT
+        return round(self.percent, 2)
+
+    @property
+    def learned(self) -> bool:
+        return self.percent is not None and self.samples >= RESERVE_MIN_SAMPLES
+
+    def add(self, soc_percent: Any, hours_750w: Any, capacity_kwh: Any) -> bool:
+        """Record one off-grid reading. False when it was skipped."""
+        soc = _number(soc_percent)
+        hours = _number(hours_750w)
+        capacity = _number(capacity_kwh)
+        if soc is None or hours is None or capacity is None or hours < 0 or capacity <= 0:
+            return False
+        if not RESERVE_MIN_SOC_PERCENT <= soc <= RESERVE_MAX_SOC_PERCENT:
+            return False
+        reserve = soc - hours * ESTIMATE_LOAD_KW / capacity * 100
+        if not RESERVE_MIN_PERCENT <= reserve <= RESERVE_MAX_PERCENT:
+            return False
+        if self.capacity_kwh != capacity:
+            self.percent, self.samples, self.capacity_kwh = None, 0, capacity
+        self.samples += 1
+        if self.percent is None:
+            self.percent = reserve
+        else:
+            self.percent += (reserve - self.percent) / min(self.samples, RESERVE_AVERAGE_WINDOW)
+        return True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "percent": self.percent,
+            "samples": self.samples,
+            "capacity_kwh": self.capacity_kwh,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> ReserveEstimate:
+        """Load saved readings. Bad or missing data starts over."""
+        if not isinstance(data, dict):
+            return cls()
+        percent = _number(data.get("percent"))
+        capacity = _number(data.get("capacity_kwh"))
+        samples = data.get("samples")
+        if (
+            percent is None
+            or capacity is None
+            or not isinstance(samples, int)
+            or isinstance(samples, bool)
+            or samples < 0
+            or not RESERVE_MIN_PERCENT <= percent <= RESERVE_MAX_PERCENT
+        ):
+            return cls()
+        return cls(percent, samples, capacity)
+
+    def as_diagnostics(self) -> dict[str, Any]:
+        return {
+            "reserve_percent": self.value,
+            "learned": self.learned,
+            "samples": self.samples,
+            "learned_percent": round(self.percent, 2) if self.percent is not None else None,
+            "capacity_kwh": self.capacity_kwh,
+        }
 
 
 def nearest_system(

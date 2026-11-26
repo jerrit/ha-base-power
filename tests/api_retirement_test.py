@@ -13,7 +13,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.base_power import api_v2
 from custom_components.base_power.api import BasePowerApiClient
-from custom_components.base_power.capacity import estimate_battery_percent
+from custom_components.base_power.capacity import ReserveEstimate, estimate_battery_percent
+from custom_components.base_power.const import BACKUP_RESERVE_PERCENT, RESERVE_MIN_SAMPLES
 
 HOST = "https://dashboard.baseapis.net"
 LEGACY = f"{HOST}/dashboard.DashboardAPI"
@@ -189,17 +190,25 @@ def test_snapshot_fills_only_what_the_context_is_missing():
 @pytest.mark.parametrize(
     ("hours", "capacity", "percent"),
     [
-        # Issue #29: a Base Core compared against the retired percent.
-        (3.66, 39.2, 17.0),
-        (23.52, 39.2, 55.0),
-        (47.04, 39.2, 100.0),
-        # A full GRO_SINGLE reads 30 h.
-        (30.0, 25, 100.0),
-        (0.0, 25, 10.0),
+        # Issue #29: Base's recalibrated 750 W hours fit a 6.4% reserve.
+        (0.0, 25, 6.4),
+        (30.0, 25, 96.4),
+        (22.85, 39.2, 50.1),
+        # A full Core settles around 98.4%, just short of 100.
+        (48.09, 39.2, 98.4),
     ],
 )
-def test_battery_percent_estimate_matches_the_retired_value(hours, capacity, percent):
+def test_battery_percent_estimate_uses_the_default_reserve(hours, capacity, percent):
     assert estimate_battery_percent(hours, capacity) == pytest.approx(percent, abs=0.1)
+
+
+@pytest.mark.parametrize(
+    ("hours", "capacity", "percent"),
+    [(3.66, 39.2, 17.0), (23.52, 39.2, 55.0), (30.0, 25, 100.0)],
+)
+def test_battery_percent_estimate_takes_a_learned_reserve(hours, capacity, percent):
+    # The 1.15.0 numbers, from the retired percent with a 10% reserve.
+    assert estimate_battery_percent(hours, capacity, 10.0) == pytest.approx(percent, abs=0.1)
 
 
 @pytest.mark.parametrize(
@@ -211,9 +220,72 @@ def test_battery_percent_estimate_needs_good_numbers(hours, capacity):
 
 
 def test_battery_percent_estimate_never_passes_full():
-    # The snapshot reads about 4% high, and the capacity setting can be wrong.
-    assert estimate_battery_percent(48.2, 39.2) == 100.0
+    # The capacity setting can be wrong.
+    assert estimate_battery_percent(50.0, 39.2) == 100.0
     assert estimate_battery_percent(47.04, 25) == 100.0
+
+
+# --- learned reserve ------------------------------------------------------------
+
+
+def _hours(soc, reserve, capacity):
+    return (soc - reserve) * capacity / 75
+
+
+def test_reserve_uses_the_default_until_it_has_enough_readings():
+    reserve = ReserveEstimate()
+    for soc in range(50, 50 + RESERVE_MIN_SAMPLES - 1):
+        assert reserve.add(soc, _hours(soc, 7.5, 39.2), 39.2)
+    assert not reserve.learned
+    assert reserve.value == BACKUP_RESERVE_PERCENT
+    assert reserve.add(70, _hours(70, 7.5, 39.2), 39.2)
+    assert reserve.learned
+    assert reserve.value == pytest.approx(7.5, abs=0.01)
+
+
+def test_reserve_averages_whole_percent_readings():
+    reserve = ReserveEstimate()
+    # Base rounds the percent, so single readings scatter around the truth.
+    for i in range(40):
+        true_soc = 60 - i * 0.37
+        assert reserve.add(round(true_soc), _hours(true_soc, 6.4, 39.2), 39.2)
+    assert reserve.value == pytest.approx(6.4, abs=0.2)
+
+
+@pytest.mark.parametrize(
+    ("soc", "hours", "capacity"),
+    [
+        (98, 40.0, 39.2),  # near full the top end bends
+        (10, 1.0, 39.2),  # too low
+        (60, 0.0, 39.2),  # reserve of 60% is not believable
+        (60, 40.0, 39.2),  # negative reserve
+        (None, 20.0, 39.2),
+        (60, None, 39.2),
+        (60, 20.0, None),
+    ],
+)
+def test_reserve_skips_bad_readings(soc, hours, capacity):
+    reserve = ReserveEstimate()
+    assert not reserve.add(soc, hours, capacity)
+    assert reserve.samples == 0
+
+
+def test_reserve_starts_over_when_the_capacity_changes():
+    reserve = ReserveEstimate(8.0, 50, 25.0)
+    assert reserve.add(60, _hours(60, 6.0, 39.2), 39.2)
+    assert reserve.samples == 1
+    assert reserve.capacity_kwh == 39.2
+    assert reserve.value == BACKUP_RESERVE_PERCENT
+
+
+def test_reserve_round_trips_and_rejects_bad_saved_data():
+    reserve = ReserveEstimate(6.1, 25, 39.2)
+    loaded = ReserveEstimate.from_dict(reserve.as_dict())
+    assert (loaded.percent, loaded.samples, loaded.capacity_kwh) == (6.1, 25, 39.2)
+    for bad in (None, [], {"percent": 50, "samples": 5, "capacity_kwh": 25},
+                {"percent": 6.0, "samples": "x", "capacity_kwh": 25},
+                {"percent": 6.0, "samples": 5}):
+        assert ReserveEstimate.from_dict(bad).samples == 0
 
 
 # --- retired methods ------------------------------------------------------------

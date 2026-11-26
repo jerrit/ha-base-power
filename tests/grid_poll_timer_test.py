@@ -43,6 +43,9 @@ async def _scheduled_refresh_after_grid_polls(polls: int) -> tuple[bool, bool]:
     coordinator._polls_since_snapshot = 0
     coordinator._snapshot = {}
     coordinator._capacity_estimate = module.CapacityEstimate()
+    coordinator._reserve = module.ReserveEstimate()
+    coordinator._reserve_store = None
+    coordinator._reserve_seen_at = None
     coordinator.service_location_id = "loc-1"
 
     async def fake_snapshot(address):
